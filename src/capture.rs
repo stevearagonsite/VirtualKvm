@@ -6,7 +6,7 @@ use std::{
 
 use futures::StreamExt;
 use input_capture::{
-    CaptureError, CaptureEvent, CaptureHandle, InputCapture, InputCaptureError, Position,
+    CaptureError, CaptureEvent, CaptureHandle, InputCapture, InputCaptureError, Position, Segment,
 };
 use input_event::{Event, KeyboardEvent, scancode};
 use lan_mouse_proto::ProtoEvent;
@@ -14,7 +14,9 @@ use local_channel::mpsc::{Receiver, Sender, channel};
 use tokio::task::{JoinHandle, spawn_local};
 use tokio_util::sync::CancellationToken;
 
+use crate::client::ClientManager;
 use crate::connect::LanMouseConnection;
+use crate::displays::LinkGeometry;
 
 pub(crate) struct Capture {
     cancellation_token: CancellationToken,
@@ -68,6 +70,8 @@ enum CaptureRequest {
     Reenable,
     /// set release bind
     SetReleaseBind(Vec<scancode::Linux>),
+    /// (VirtualKvm) the display link of a client changed
+    UpdateLink(CaptureHandle),
 }
 
 impl Capture {
@@ -75,6 +79,7 @@ impl Capture {
         backend: Option<input_capture::Backend>,
         conn: LanMouseConnection,
         release_bind: Vec<scancode::Linux>,
+        client_manager: ClientManager,
     ) -> Self {
         let (request_tx, request_rx) = channel();
         let (event_tx, event_rx) = channel();
@@ -84,6 +89,8 @@ impl Capture {
             backend,
             cancellation_token: cancellation_token.clone(),
             captures: Default::default(),
+            client_manager,
+            pending_enter: None,
             conn,
             event_tx,
             request_rx,
@@ -141,6 +148,11 @@ impl Capture {
         self.event_rx.recv().await.expect("channel closed")
     }
 
+    /// (VirtualKvm) re-apply the display link of a client
+    pub(crate) fn update_link(&self, handle: CaptureHandle) {
+        let _ = self.request_tx.send(CaptureRequest::UpdateLink(handle));
+    }
+
     pub(crate) fn set_release_bind(&mut self, bind: Vec<scancode::Linux>) {
         let _ = self.request_tx.send(CaptureRequest::SetReleaseBind(bind));
     }
@@ -168,6 +180,10 @@ struct CaptureTask {
     backend: Option<input_capture::Backend>,
     cancellation_token: CancellationToken,
     captures: Vec<(CaptureHandle, Position, CaptureType)>,
+    /// (VirtualKvm) access to display links and peer displays
+    client_manager: ClientManager,
+    /// (VirtualKvm) `Enter`/`EnterAt` to (re)send until the peer acknowledges
+    pending_enter: Option<ProtoEvent>,
     conn: LanMouseConnection,
     event_tx: Sender<ICaptureEvent>,
     release_bind: Rc<RefCell<Vec<scancode::Linux>>>,
@@ -198,6 +214,56 @@ impl CaptureTask {
             .1
     }
 
+    /// (VirtualKvm) resolved link geometry of an outgoing client, if it has a link
+    fn link_geometry(&self, handle: CaptureHandle) -> Option<LinkGeometry> {
+        let link = self.client_manager.get_link(handle)?;
+        let pos = self.client_manager.get_pos(handle)?;
+        let geometry = LinkGeometry::resolve(
+            &link,
+            pos,
+            &vkvm_displays::list(),
+            &self.client_manager.remote_displays(handle),
+        );
+        if geometry.is_none() {
+            log::warn!(
+                "client {handle}: local display `{}` not found",
+                link.local_display
+            );
+        }
+        geometry
+    }
+
+    /// (VirtualKvm) barrier segment for a client (None = whole desktop edge)
+    fn segment(&self, handle: CaptureHandle) -> Option<Segment> {
+        if !self
+            .captures
+            .iter()
+            .any(|&(h, _, t)| h == handle && t == CaptureType::Default)
+        {
+            return None;
+        }
+        let g = self.link_geometry(handle)?;
+        let (from, to) = g.segment();
+        Some(Segment {
+            x: g.local.x,
+            y: g.local.y,
+            width: g.local.w,
+            height: g.local.h,
+            from,
+            to,
+        })
+    }
+
+    async fn apply_segment(
+        &mut self,
+        capture: &mut InputCapture,
+        handle: CaptureHandle,
+    ) -> Result<(), CaptureError> {
+        let segment = self.segment(handle);
+        log::info!("client {handle}: barrier segment {segment:?}");
+        capture.set_segment(handle, segment).await
+    }
+
     fn get_type(&self, handle: CaptureHandle) -> CaptureType {
         self.captures
             .iter()
@@ -221,6 +287,7 @@ impl CaptureTask {
                         CaptureRequest::SetReleaseBind(bind) => {
                             self.release_bind.borrow_mut().clone_from(&bind);
                         }
+                        CaptureRequest::UpdateLink(_) => { /* applied when capture starts */ }
                     },
                     _ = self.cancellation_token.cancelled() => return,
                 }
@@ -263,6 +330,7 @@ impl CaptureTask {
                 r = capture.create(handle, pos) => r?,
                 _ = self.cancellation_token.cancelled() => return Ok(()),
             }
+            self.apply_segment(capture, handle).await?;
         }
         Ok(())
     }
@@ -278,6 +346,14 @@ impl CaptureTask {
                     None => return Ok(()),
                 },
                 (handle, event) = self.conn.recv() => {
+                    // (VirtualKvm) the peer finished announcing its displays:
+                    // the barrier segment may change
+                    if let ProtoEvent::DisplayInfo { index, count, .. } = event {
+                        if index + 1 == count {
+                            self.apply_segment(capture, handle).await?;
+                        }
+                        continue;
+                    }
                     if let Some(active) = self.active_client {
                         if handle != active {
                             // we only care about events coming from the client we are currently connected to
@@ -297,6 +373,12 @@ impl CaptureTask {
                             log::info!("releasing capture: left remote client device region");
                             self.release_capture(capture).await?;
                         },
+                        // (VirtualKvm) place our cursor where it left the peer
+                        ProtoEvent::LeaveAt { x, y } => {
+                            let point = self.link_geometry(handle).map(|g| g.to_local(x, y));
+                            log::info!("releasing capture: left remote client device at ({x:.0}, {y:.0}) -> {point:?}");
+                            self.release_capture_at(capture, point).await?;
+                        },
                         _ => {}
                     }
                 },
@@ -306,7 +388,9 @@ impl CaptureTask {
                     CaptureRequest::Create(h, p, t) => {
                         self.add_capture(h, p, t);
                         capture.create(h, p).await?;
+                        self.apply_segment(capture, h).await?;
                     }
+                    CaptureRequest::UpdateLink(h) => self.apply_segment(capture, h).await?,
                     CaptureRequest::Destroy(h) => {
                         // If the capture we're tearing down is the
                         // currently-active one, treat this as a
@@ -344,7 +428,8 @@ impl CaptureTask {
             return self.release_capture(capture).await;
         }
 
-        if event == CaptureEvent::Begin {
+        let begin = matches!(event, CaptureEvent::Begin | CaptureEvent::BeginAt { .. });
+        if begin {
             self.event_tx
                 .send(ICaptureEvent::CaptureBegin(handle))
                 .expect("channel closed");
@@ -363,7 +448,7 @@ impl CaptureTask {
         }
 
         // activated a new client
-        if event == CaptureEvent::Begin && Some(handle) != self.active_client {
+        if begin && Some(handle) != self.active_client {
             self.state = State::WaitingForAck;
             self.active_client.replace(handle);
             self.event_tx
@@ -373,11 +458,33 @@ impl CaptureTask {
 
         let opposite_pos = to_proto_pos(self.get_pos(handle).opposite());
 
+        // (VirtualKvm) with a display link, tell the peer exactly where to enter
+        if begin {
+            let entry = match event {
+                CaptureEvent::BeginAt { x, y } => self
+                    .link_geometry(handle)
+                    .and_then(|g| g.to_remote(x, y))
+                    .map(|(x, y)| ProtoEvent::EnterAt {
+                        pos: opposite_pos,
+                        x,
+                        y,
+                    }),
+                _ => None,
+            };
+            if let Some(e) = &entry {
+                log::info!("client {handle}: {e}");
+            }
+            self.pending_enter = Some(entry.unwrap_or(ProtoEvent::Enter(opposite_pos)));
+        }
+        let enter = self
+            .pending_enter
+            .unwrap_or(ProtoEvent::Enter(opposite_pos));
+
         let event = match event {
-            CaptureEvent::Begin => ProtoEvent::Enter(opposite_pos),
+            CaptureEvent::Begin | CaptureEvent::BeginAt { .. } => enter,
             CaptureEvent::Input(e) => match self.state {
                 // connection not acknowledged, repeat `Enter` event
-                State::WaitingForAck => ProtoEvent::Enter(opposite_pos),
+                State::WaitingForAck => enter,
                 State::Sending => ProtoEvent::Input(e),
             },
         };
@@ -395,6 +502,16 @@ impl CaptureTask {
     }
 
     async fn release_capture(&mut self, capture: &mut InputCapture) -> Result<(), CaptureError> {
+        self.release_capture_at(capture, None).await
+    }
+
+    /// release the capture; with `point`, the local cursor reappears there (VirtualKvm)
+    async fn release_capture_at(
+        &mut self,
+        capture: &mut InputCapture,
+        point: Option<(f64, f64)>,
+    ) -> Result<(), CaptureError> {
+        self.pending_enter = None;
         // If we have an active client, notify them we're leaving
         if let Some(handle) = self.active_client.take() {
             // Surface the leave to the service layer so it can fire
@@ -444,7 +561,10 @@ impl CaptureTask {
                 log::warn!("failed to send Leave to client {handle}: {e}");
             }
         }
-        capture.release().await
+        match point {
+            Some((x, y)) => capture.release_at(x, y).await,
+            None => capture.release().await,
+        }
     }
 }
 

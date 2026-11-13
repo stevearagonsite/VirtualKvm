@@ -45,11 +45,24 @@ pub fn list() -> Vec<Display> {
     imp::list()
 }
 
+/// current cursor position in global desktop coordinates
+pub fn cursor_position() -> Option<(f64, f64)> {
+    imp::cursor_position()
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::Display;
     use core_graphics::display::CGDisplay;
     use std::collections::HashMap;
+
+    pub fn cursor_position() -> Option<(f64, f64)> {
+        use core_graphics::event::CGEvent;
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).ok()?;
+        let p = CGEvent::new(source).ok()?.location();
+        Some((p.x, p.y))
+    }
 
     pub fn list() -> Vec<Display> {
         let names = screen_names();
@@ -124,6 +137,14 @@ mod imp {
 
     const MONITORINFOF_PRIMARY: u32 = 1;
 
+    pub fn cursor_position() -> Option<(f64, f64)> {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut p = POINT::default();
+        unsafe { GetCursorPos(&mut p) }.ok()?;
+        Some((p.x as f64, p.y as f64))
+    }
+
     unsafe extern "system" fn monitor_enum_proc(
         hmon: HMONITOR,
         _hdc: HDC,
@@ -144,11 +165,11 @@ mod imp {
             .unwrap_or(info.szDevice.len());
         let device = String::from_utf16_lossy(&info.szDevice[..len]);
         let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
-        let scale = match unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
-        {
-            Ok(()) => dpi_x as f64 / 96.0,
-            Err(_) => 1.0,
-        };
+        let scale =
+            match unsafe { GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) } {
+                Ok(()) => dpi_x as f64 / 96.0,
+                Err(_) => 1.0,
+            };
         displays.push(Display {
             id: device.clone(),
             name: device,
@@ -183,5 +204,9 @@ mod imp {
     /// not implemented yet on this platform (X11 RandR / wl_output, see PLAN.md §6)
     pub fn list() -> Vec<Display> {
         Vec::new()
+    }
+
+    pub fn cursor_position() -> Option<(f64, f64)> {
+        None
     }
 }

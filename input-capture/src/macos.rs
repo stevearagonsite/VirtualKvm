@@ -1,4 +1,6 @@
-use super::{Capture, CaptureError, CaptureEvent, Position, error::MacosCaptureCreationError};
+use super::{
+    Capture, CaptureError, CaptureEvent, Position, Segment, error::MacosCaptureCreationError,
+};
 use async_trait::async_trait;
 use bitflags::bitflags;
 use core_foundation::{
@@ -25,7 +27,7 @@ use keycode::{KeyMap, KeyMapping};
 use libc::c_void;
 use once_cell::unsync::Lazy;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::{CString, c_char},
     pin::Pin,
     sync::{Arc, OnceLock},
@@ -58,6 +60,8 @@ struct InputCaptureState {
     bounds: Bounds,
     /// current state of modifier keys
     modifier_state: XMods,
+    /// (VirtualKvm) barriers restricted to a display segment
+    segments: HashMap<Position, Segment>,
 }
 
 #[derive(Debug)]
@@ -66,6 +70,10 @@ enum ProducerEvent {
     Create(Position),
     Destroy(Position),
     Grab(Position),
+    /// (VirtualKvm) restrict a barrier to a display segment
+    SetSegment(Position, Option<Segment>),
+    /// (VirtualKvm) release with the cursor placed at the given point
+    ReleaseAt(f64, f64),
     EventTapDisabled,
     DisplayReconfigured,
 }
@@ -78,6 +86,7 @@ impl InputCaptureState {
             enter_position: None,
             bounds: Bounds::default(),
             modifier_state: Default::default(),
+            segments: HashMap::new(),
         };
         res.update_bounds()?;
         Ok(res)
@@ -89,6 +98,13 @@ impl InputCaptureState {
         let relative_y = event.get_double_value_field(EventField::MOUSE_EVENT_DELTA_Y);
 
         for &position in self.active_clients.iter() {
+            if let Some(segment) = self.segments.get(&position) {
+                if segment.crossed(position, location.x, location.y, relative_x, relative_y) {
+                    log::debug!("Crossed segment barrier into position: {position:?}");
+                    return Some(position);
+                }
+                continue;
+            }
             if (position == Position::Left && (location.x + relative_x) <= self.bounds.xmin)
                 || (position == Position::Right && (location.x + relative_x) >= self.bounds.xmax)
                 || (position == Position::Top && (location.y + relative_y) <= self.bounds.ymin)
@@ -121,6 +137,17 @@ impl InputCaptureState {
     fn start_capture(&mut self, event: &CGEvent, position: Position) -> Result<(), CaptureError> {
         let mut location = event.location();
         let edge_offset = 1.0;
+        if let Some(s) = self.segments.get(&position) {
+            // (VirtualKvm) keep the hidden cursor at the edge of the linked display
+            match position {
+                Position::Left => location.x = s.x + edge_offset,
+                Position::Right => location.x = s.x + s.width - edge_offset,
+                Position::Top => location.y = s.y + edge_offset,
+                Position::Bottom => location.y = s.y + s.height - edge_offset,
+            };
+            self.enter_position = Some(location);
+            return self.reset_cursor();
+        }
         // move cursor location to display bounds
         match position {
             Position::Left => location.x = self.bounds.xmin + edge_offset,
@@ -167,6 +194,22 @@ impl InputCaptureState {
             }
             ProducerEvent::Create(p) => {
                 self.active_clients.insert(p);
+            }
+            ProducerEvent::SetSegment(p, segment) => match segment {
+                Some(s) => {
+                    self.segments.insert(p, s);
+                }
+                None => {
+                    self.segments.remove(&p);
+                }
+            },
+            ProducerEvent::ReleaseAt(x, y) => {
+                if self.current_pos.is_some() {
+                    self.enter_position = Some(CGPoint::new(x, y));
+                    self.reset_cursor()?;
+                    self.show_cursor()?;
+                    self.current_pos = None;
+                }
             }
             ProducerEvent::Destroy(p) => {
                 if let Some(current) = self.current_pos {
@@ -530,10 +573,14 @@ fn create_event_tap<'a>(
             // Did we cross a barrier?
             if let Some(new_pos) = state.crossed(cg_ev) {
                 capture_position = Some(new_pos);
+                let crossing = cg_ev.location();
                 state
                     .start_capture(cg_ev, new_pos)
                     .unwrap_or_else(|e| log::warn!("{e}"));
-                res_events.push(CaptureEvent::Begin);
+                res_events.push(CaptureEvent::BeginAt {
+                    x: crossing.x,
+                    y: crossing.y,
+                });
                 notify_tx
                     .blocking_send(ProducerEvent::Grab(new_pos))
                     .expect("Failed to send notification");
@@ -794,6 +841,25 @@ impl Capture for MacOSInputCapture {
 
     async fn terminate(&mut self) -> Result<(), CaptureError> {
         Ok(())
+    }
+
+    fn set_segment(&mut self, pos: Position, segment: Option<Segment>) {
+        let notify_tx = self.notify_tx.clone();
+        tokio::task::spawn_local(async move {
+            log::debug!("set segment {pos}: {segment:?}");
+            let _ = notify_tx
+                .send(ProducerEvent::SetSegment(pos, segment))
+                .await;
+        });
+    }
+
+    fn release_at(&mut self, x: f64, y: f64) -> bool {
+        let notify_tx = self.notify_tx.clone();
+        tokio::task::spawn_local(async move {
+            log::debug!("notifying ReleaseAt({x}, {y})");
+            let _ = notify_tx.send(ProducerEvent::ReleaseAt(x, y)).await;
+        });
+        true
     }
 }
 

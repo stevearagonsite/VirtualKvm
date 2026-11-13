@@ -643,6 +643,15 @@ impl Emulation for MacOSEmulation {
     async fn destroy(&mut self, _handle: EmulationHandle) {}
 
     async fn terminate(&mut self) {}
+
+    async fn warp(&mut self, x: f64, y: f64) -> Result<(), EmulationError> {
+        if let Err(e) =
+            core_graphics::display::CGDisplay::warp_mouse_cursor_position(CGPoint::new(x, y))
+        {
+            log::warn!("warp_mouse_cursor_position({x}, {y}) failed: {e:?}");
+        }
+        Ok(())
+    }
 }
 
 fn update_modifiers(modifiers: &Cell<XMods>, key: u32, state: u8) -> bool {

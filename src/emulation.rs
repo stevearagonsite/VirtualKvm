@@ -64,6 +64,13 @@ pub(crate) enum EmulationEvent {
         addr: SocketAddr,
         commit: [u8; 8],
     },
+    /// (VirtualKvm) peer announced one of its displays
+    PeerDisplay {
+        addr: SocketAddr,
+        index: u8,
+        count: u8,
+        display: lan_mouse_ipc::DisplayInfo,
+    },
 }
 
 enum EmulationRequest {
@@ -156,6 +163,16 @@ impl ListenTask {
                                     self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint}).expect("channel closed");
                                 }
                             }
+                            // (VirtualKvm) like Enter, plus the exact entry point
+                            ProtoEvent::EnterAt { pos, x, y } => {
+                                if let Some(fingerprint) = self.listener.get_certificate_fingerprint(addr).await {
+                                    log::info!("releasing capture: {addr} entered this device at ({x:.0}, {y:.0})");
+                                    self.event_tx.send(EmulationEvent::ReleaseNotify).expect("channel closed");
+                                    self.listener.reply(addr, ProtoEvent::Ack(0)).await;
+                                    self.emulation_proxy.warp(x, y);
+                                    self.event_tx.send(EmulationEvent::Entered{addr, pos: to_ipc_pos(pos), fingerprint}).expect("channel closed");
+                                }
+                            }
                             ProtoEvent::Leave(_) => {
                                 self.emulation_proxy.remove(addr);
                                 self.listener.reply(addr, ProtoEvent::Ack(0)).await;
@@ -175,7 +192,15 @@ impl ListenTask {
                             // the peer is in fact happily talking to us.
                             ProtoEvent::Hello { commit } => {
                                 self.listener.reply(addr, ProtoEvent::Hello { commit: local_commit() }).await;
+                                // (VirtualKvm) announce our displays as well
+                                for event in crate::displays::local_display_events() {
+                                    self.listener.reply(addr, event).await;
+                                }
                                 self.event_tx.send(EmulationEvent::PeerHello { addr, commit }).expect("channel closed");
+                            }
+                            ProtoEvent::DisplayInfo { index, count, x, y, width, height, scale_pct } => {
+                                let display = crate::displays::remote_display(index, x, y, width, height, scale_pct);
+                                self.event_tx.send(EmulationEvent::PeerDisplay { addr, index, count, display }).expect("channel closed");
                             }
                             _ => {}
                         }
@@ -198,7 +223,15 @@ impl ListenTask {
                     // reenable emulation
                     EmulationRequest::Reenable => self.emulation_proxy.reenable(),
                     // notify the other end that we hit a barrier (should release capture)
-                    EmulationRequest::Release(addr) => self.listener.reply(addr, ProtoEvent::Leave(0)).await,
+                    EmulationRequest::Release(addr) => {
+                        // (VirtualKvm) tell the peer where the cursor left so it can
+                        // place its own cursor at the matching spot. Old peers ignore
+                        // `LeaveAt` and still get the plain `Leave`.
+                        if let Some((x, y)) = vkvm_displays::cursor_position() {
+                            self.listener.reply(addr, ProtoEvent::LeaveAt { x, y }).await;
+                        }
+                        self.listener.reply(addr, ProtoEvent::Leave(0)).await
+                    }
                     EmulationRequest::ChangePort(port) => {
                         self.listener.request_port_change(port);
                         let result = self.listener.port_changed().await;
@@ -237,6 +270,8 @@ pub(crate) struct EmulationProxy {
 
 enum ProxyRequest {
     Input(Event, SocketAddr),
+    /// (VirtualKvm) move the cursor to an absolute position
+    Warp(f64, f64),
     Remove(SocketAddr),
     Terminate,
     Reenable,
@@ -286,6 +321,15 @@ impl EmulationProxy {
         }
     }
 
+    /// (VirtualKvm) place the cursor at the entry point announced by the peer
+    fn warp(&self, x: f64, y: f64) {
+        if self.emulation_active.get() {
+            self.request_tx
+                .send(ProxyRequest::Warp(x, y))
+                .expect("channel closed");
+        }
+    }
+
     fn remove(&self, addr: SocketAddr) {
         self.request_tx
             .send(ProxyRequest::Remove(addr))
@@ -331,6 +375,7 @@ impl EmulationTask {
                     ProxyRequest::Reenable => break,
                     ProxyRequest::Terminate => return,
                     ProxyRequest::Input(..) => { /* emulation inactive => ignore */ }
+                    ProxyRequest::Warp(..) => { /* emulation inactive => ignore */ }
                     ProxyRequest::Remove(..) => { /* emulation inactive => ignore */ }
                 }
             }
@@ -397,6 +442,7 @@ impl EmulationTask {
                         };
                         emulation.consume(event, handle).await?;
                     },
+                    ProxyRequest::Warp(x, y) => emulation.warp(x, y).await?,
                     ProxyRequest::Remove(addr) => {
                         if let Some(handle) = self.handles.remove(&addr) {
                             emulation.destroy(handle).await;
@@ -424,6 +470,7 @@ async fn wait_for_termination(rx: &mut Receiver<ProxyRequest>) {
         match rx.recv().await.expect("channel closed") {
             ProxyRequest::Terminate => return,
             ProxyRequest::Input(_, _) => continue,
+            ProxyRequest::Warp(..) => continue,
             ProxyRequest::Remove(_) => continue,
             ProxyRequest::Reenable => continue,
         }

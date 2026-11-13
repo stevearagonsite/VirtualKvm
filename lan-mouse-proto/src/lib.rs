@@ -72,6 +72,28 @@ pub enum ProtoEvent {
     /// recognize the event type silently skip it per the
     /// forward-compat handling in the receive loop.
     Hello { commit: [u8; 8] },
+    /// (VirtualKvm) one of the sender's displays, in the sender's own
+    /// global desktop coordinates. A peer sends `count` of these
+    /// (index `0..count`) after the `Hello` handshake and again when its
+    /// display configuration changes.
+    DisplayInfo {
+        index: u8,
+        count: u8,
+        x: i32,
+        y: i32,
+        width: u16,
+        height: u16,
+        /// scale factor in percent (100 = 1.0, 200 = Retina)
+        scale_pct: u16,
+    },
+    /// (VirtualKvm) like [`ProtoEvent::Enter`], but with the exact entry
+    /// point in the *receiver's* global coordinates. The receiver warps
+    /// its cursor there before applying further motion.
+    EnterAt { pos: Position, x: f64, y: f64 },
+    /// (VirtualKvm) like [`ProtoEvent::Leave`], with the point (in the
+    /// sender's own coordinates) where the cursor left, so the other side
+    /// can place its cursor at the matching spot.
+    LeaveAt { x: f64, y: f64 },
 }
 
 impl Display for ProtoEvent {
@@ -93,6 +115,22 @@ impl Display for ProtoEvent {
                 let s = std::str::from_utf8(commit).unwrap_or("????????");
                 write!(f, "Hello({s})")
             }
+            ProtoEvent::DisplayInfo {
+                index,
+                count,
+                x,
+                y,
+                width,
+                height,
+                scale_pct,
+            } => write!(
+                f,
+                "DisplayInfo({index}/{count}: {width}x{height}@({x},{y}) {scale_pct}%)"
+            ),
+            ProtoEvent::EnterAt { pos, x, y } => write!(f, "EnterAt({pos}, {x:.0}, {y:.0})"),
+            ProtoEvent::LeaveAt { x, y } => {
+                write!(f, "LeaveAt({x:.0}, {y:.0})")
+            }
         }
     }
 }
@@ -112,6 +150,9 @@ pub enum EventType {
     Leave,
     Ack,
     Hello,
+    DisplayInfo,
+    EnterAt,
+    LeaveAt,
 }
 
 impl ProtoEvent {
@@ -135,6 +176,9 @@ impl ProtoEvent {
             ProtoEvent::Leave(_) => EventType::Leave,
             ProtoEvent::Ack(_) => EventType::Ack,
             ProtoEvent::Hello { .. } => EventType::Hello,
+            ProtoEvent::DisplayInfo { .. } => EventType::DisplayInfo,
+            ProtoEvent::EnterAt { .. } => EventType::EnterAt,
+            ProtoEvent::LeaveAt { .. } => EventType::LeaveAt,
         }
     }
 }
@@ -196,6 +240,24 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
                 }
                 Ok(Self::Hello { commit })
             }
+            EventType::DisplayInfo => Ok(Self::DisplayInfo {
+                index: decode_u8(&mut buf)?,
+                count: decode_u8(&mut buf)?,
+                x: decode_i32(&mut buf)?,
+                y: decode_i32(&mut buf)?,
+                width: decode_u16(&mut buf)?,
+                height: decode_u16(&mut buf)?,
+                scale_pct: decode_u16(&mut buf)?,
+            }),
+            EventType::EnterAt => Ok(Self::EnterAt {
+                pos: decode_u8(&mut buf)?.try_into()?,
+                x: decode_f64(&mut buf)?,
+                y: decode_f64(&mut buf)?,
+            }),
+            EventType::LeaveAt => Ok(Self::LeaveAt {
+                x: decode_f64(&mut buf)?,
+                y: decode_f64(&mut buf)?,
+            }),
         }
     }
 }
@@ -265,6 +327,32 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                         encode_u8(buf, len, *b);
                     }
                 }
+                ProtoEvent::DisplayInfo {
+                    index,
+                    count,
+                    x,
+                    y,
+                    width,
+                    height,
+                    scale_pct,
+                } => {
+                    encode_u8(buf, len, index);
+                    encode_u8(buf, len, count);
+                    encode_i32(buf, len, x);
+                    encode_i32(buf, len, y);
+                    encode_u16(buf, len, width);
+                    encode_u16(buf, len, height);
+                    encode_u16(buf, len, scale_pct);
+                }
+                ProtoEvent::EnterAt { pos, x, y } => {
+                    encode_u8(buf, len, pos as u8);
+                    encode_f64(buf, len, x);
+                    encode_f64(buf, len, y);
+                }
+                ProtoEvent::LeaveAt { x, y } => {
+                    encode_f64(buf, len, x);
+                    encode_f64(buf, len, y);
+                }
             }
         }
         (buf, len)
@@ -284,6 +372,7 @@ macro_rules! decode_impl {
 }
 
 decode_impl!(u8);
+decode_impl!(u16);
 decode_impl!(u32);
 decode_impl!(i32);
 decode_impl!(f64);
@@ -304,6 +393,65 @@ macro_rules! encode_impl {
 }
 
 encode_impl!(u8);
+encode_impl!(u16);
 encode_impl!(u32);
 encode_impl!(i32);
 encode_impl!(f64);
+
+#[cfg(test)]
+mod vkvm_tests {
+    use super::*;
+
+    fn roundtrip(e: ProtoEvent) -> ProtoEvent {
+        let (buf, _len): ([u8; MAX_EVENT_SIZE], usize) = e.into();
+        buf.try_into().expect("decode")
+    }
+
+    #[test]
+    fn display_info_roundtrip() {
+        match roundtrip(ProtoEvent::DisplayInfo {
+            index: 1,
+            count: 2,
+            x: 927,
+            y: -1080,
+            width: 1920,
+            height: 1080,
+            scale_pct: 100,
+        }) {
+            ProtoEvent::DisplayInfo {
+                index: 1,
+                count: 2,
+                x: 927,
+                y: -1080,
+                width: 1920,
+                height: 1080,
+                scale_pct: 100,
+            } => {}
+            e => panic!("unexpected {e}"),
+        }
+    }
+
+    #[test]
+    fn enter_at_roundtrip() {
+        match roundtrip(ProtoEvent::EnterAt {
+            pos: Position::Right,
+            x: 1918.0,
+            y: 540.5,
+        }) {
+            ProtoEvent::EnterAt {
+                pos: Position::Right,
+                x,
+                y,
+            } => assert_eq!((x, y), (1918.0, 540.5)),
+            e => panic!("unexpected {e}"),
+        }
+    }
+
+    #[test]
+    fn leave_at_roundtrip() {
+        match roundtrip(ProtoEvent::LeaveAt { x: -1.0, y: 300.0 }) {
+            ProtoEvent::LeaveAt { x, y } => assert_eq!((x, y), (-1.0, 300.0)),
+            e => panic!("unexpected {e}"),
+        }
+    }
+}

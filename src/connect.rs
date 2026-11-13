@@ -210,6 +210,13 @@ async fn connect_to_handle(
         if let Err(e) = conn.send(&buf[..len]).await {
             log::debug!("hello send to {addr} failed: {e}");
         }
+        // (VirtualKvm) announce our displays so the peer can align the layout
+        for event in crate::displays::local_display_events() {
+            let (buf, len) = event.into();
+            if let Err(e) = conn.send(&buf[..len]).await {
+                log::debug!("display info send to {addr} failed: {e}");
+            }
+        }
 
         // poll connection for active
         spawn_local(ping_pong(addr, conn.clone(), ping_response.clone()));
@@ -280,6 +287,22 @@ async fn receive_loop(
                     }
                     ProtoEvent::Hello { commit } => {
                         client_manager.set_peer_commit(handle, Some(commit));
+                    }
+                    ProtoEvent::DisplayInfo {
+                        index,
+                        count,
+                        x,
+                        y,
+                        width,
+                        height,
+                        scale_pct,
+                    } => {
+                        let display =
+                            crate::displays::remote_display(index, x, y, width, height, scale_pct);
+                        log::info!("client ({handle}) display {index}/{count}: {display:?}");
+                        client_manager.set_remote_display(handle, index, count, display);
+                        // let the capture task re-evaluate the barrier segment
+                        tx.send((handle, event)).expect("channel closed");
                     }
                     event => tx.send((handle, event)).expect("channel closed"),
                 }
