@@ -91,6 +91,7 @@ impl Capture {
             captures: Default::default(),
             client_manager,
             pending_enter: None,
+            crossing: None,
             conn,
             event_tx,
             request_rx,
@@ -184,6 +185,8 @@ struct CaptureTask {
     client_manager: ClientManager,
     /// (VirtualKvm) `Enter`/`EnterAt` to (re)send until the peer acknowledges
     pending_enter: Option<ProtoEvent>,
+    /// (VirtualKvm) local point where the barrier was crossed
+    crossing: Option<(f64, f64)>,
     conn: LanMouseConnection,
     event_tx: Sender<ICaptureEvent>,
     release_bind: Rc<RefCell<Vec<scancode::Linux>>>,
@@ -458,19 +461,28 @@ impl CaptureTask {
 
         let opposite_pos = to_proto_pos(self.get_pos(handle).opposite());
 
-        // (VirtualKvm) with a display link, tell the peer exactly where to enter
+        // (VirtualKvm) with a display link, tell the peer exactly where to enter.
+        // The peer's displays may only become known once the connection is up,
+        // so keep retrying while the `Enter` is not acknowledged yet.
         if begin {
-            let entry = match event {
-                CaptureEvent::BeginAt { x, y } => self
-                    .link_geometry(handle)
-                    .and_then(|g| g.to_remote(x, y))
-                    .map(|(x, y)| ProtoEvent::EnterAt {
-                        pos: opposite_pos,
-                        x,
-                        y,
-                    }),
+            self.crossing = match event {
+                CaptureEvent::BeginAt { x, y } => Some((x, y)),
                 _ => None,
             };
+            self.pending_enter = None;
+            self.crossing = None;
+        }
+        if self.state == State::WaitingForAck
+            && !matches!(self.pending_enter, Some(ProtoEvent::EnterAt { .. }))
+        {
+            let entry = self
+                .crossing
+                .and_then(|(x, y)| self.link_geometry(handle)?.to_remote(x, y))
+                .map(|(x, y)| ProtoEvent::EnterAt {
+                    pos: opposite_pos,
+                    x,
+                    y,
+                });
             if let Some(e) = &entry {
                 log::info!("client {handle}: {e}");
             }

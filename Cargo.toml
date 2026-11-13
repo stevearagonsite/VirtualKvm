@@ -8,6 +8,7 @@ members = [
     "lan-mouse-gtk",
     "lan-mouse-proto",
     "vkvm-displays",
+    "vkvm-web",
 ]
 
 [package]
@@ -36,6 +37,7 @@ lan-mouse-gtk = { path = "lan-mouse-gtk", version = "0.3.0", optional = true }
 lan-mouse-ipc = { path = "lan-mouse-ipc", version = "0.3.0" }
 lan-mouse-proto = { path = "lan-mouse-proto", version = "0.3.0" }
 vkvm-displays = { path = "vkvm-displays", version = "0.1.0" }
+vkvm-web = { path = "vkvm-web", version = "0.1.0" }
 shadow-rs = { version = "1.2.0", features = ["metadata"] }
 
 toml = "0.8"

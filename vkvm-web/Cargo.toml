@@ -1,0 +1,19 @@
+[package]
+name = "vkvm-web"
+description = "Localhost web UI (display layout editor) for VirtualKvm"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/stevearagonsite/VirtualKvm"
+
+[dependencies]
+lan-mouse-ipc = { path = "../lan-mouse-ipc", version = "0.3.0" }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+clap = { version = "4.4.11", features = ["derive"] }
+futures = "0.3.30"
+log = "0.4.20"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.107"
+thiserror = "2.0.0"
+tokio = { version = "1.32.0", features = ["macros", "net", "rt", "sync", "time"] }

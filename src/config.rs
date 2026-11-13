@@ -129,6 +129,8 @@ pub enum Command {
     Cli(CliArgs),
     /// run in daemon mode
     Daemon,
+    /// (VirtualKvm) web UI on localhost: display layout editor
+    Web(vkvm_web::WebArgs),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
