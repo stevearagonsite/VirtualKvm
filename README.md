@@ -1,3 +1,21 @@
+# VirtualKvm
+
+> **VirtualKvm is a fork of [Lan Mouse](https://github.com/feschber/lan-mouse)**, created by
+> Ferdinand Schober ([@feschber](https://github.com/feschber)) and the Lan Mouse contributors.
+> All the base code comes from that project, and its full git history is preserved here.
+> VirtualKvm keeps the same license, **GPL-3.0-or-later**, and stays open source
+> (see [LICENSE](LICENSE) and [NOTICE](NOTICE)).
+>
+> This fork adds a localhost web UI with a per-monitor layout editor, LAN-only hardening,
+> mDNS discovery, Wake-on-LAN, and headless Linux support (uinput + TUI).
+> See [PLAN.md](PLAN.md) (in Spanish). Changes that are useful upstream will be offered back to Lan Mouse.
+>
+> *Español: VirtualKvm es un fork de Lan Mouse. Conserva su historia, su autoría y su licencia GPL-3.0-or-later.*
+
+The original Lan Mouse README follows.
+
+---
+
 # Lan Mouse
 
 [![CI](https://github.com/feschber/lan-mouse/actions/workflows/rust.yml/badge.svg)](https://github.com/feschber/lan-mouse/actions/workflows/rust.yml) [![Cachix](https://github.com/feschber/lan-mouse/actions/workflows/cachix.yml/badge.svg)](https://github.com/feschber/lan-mouse/actions/workflows/cachix.yml) [![Release](https://github.com/feschber/lan-mouse/actions/workflows/release.yml/badge.svg)](https://github.com/feschber/lan-mouse/actions/workflows/release.yml)

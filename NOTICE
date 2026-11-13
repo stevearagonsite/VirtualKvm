@@ -1,0 +1,15 @@
+VirtualKvm
+Copyright (C) 2026 Steve Aragon and the VirtualKvm contributors
+
+VirtualKvm is a fork of Lan Mouse:
+  https://github.com/feschber/lan-mouse
+  Copyright (C) Ferdinand Schober (feschber) and the Lan Mouse contributors
+
+Forked from upstream commit 69958c625163649b69e27d0a6fb5a3edd596a467
+(main, after release v0.11.0) on 2026-11-12. All code inherited from that
+commit belongs to its original authors; the full history is preserved in git.
+
+Lan Mouse is licensed under the GNU General Public License, version 3 or
+(at your option) any later version. VirtualKvm keeps the same license:
+all modifications made in this fork are also released under
+GPL-3.0-or-later. See LICENSE for the full text.
