@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VirtualKvm · Monitores</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085; --line: #d9dde5;
+    --local: #3b6fd8; --local-fill: #e8eefc; --remote: #d9822b; --remote-fill: #fdf0e3;
+    --seg: #1f9d55; --bad: #c53030; --accent: #3b6fd8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b2029; --text: #e6e9ef; --muted: #98a1b3; --line: #2c3340;
+      --local: #6d97ff; --local-fill: #1d2a45; --remote: #f0a35b; --remote-fill: #3a2a1a;
+      --seg: #48c78e; --bad: #fc8181; --accent: #6d97ff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 16px 20px 8px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  header .status { color: var(--muted); font-size: 13px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 16px; padding: 8px 20px 20px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  #stage { position: relative; min-height: 420px; padding: 8px; }
+  svg { width: 100%; height: 100%; min-height: 420px; display: block; touch-action: none; }
+  .local rect { fill: var(--local-fill); stroke: var(--local); stroke-width: 1.5; }
+  .remote rect { fill: var(--remote-fill); stroke: var(--remote); stroke-width: 2; cursor: grab; }
+  .remote.dragging rect { cursor: grabbing; opacity: .85; }
+  .remote.unlinked rect { stroke-dasharray: 6 4; }
+  text { fill: var(--text); font-size: 12px; pointer-events: none; }
+  text.sub { fill: var(--muted); font-size: 11px; }
+  line.seg { stroke: var(--seg); stroke-width: 5; stroke-linecap: round; }
+  aside { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  aside h2 { font-size: 14px; margin: 0; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+  select, input { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; }
+  .row { display: flex; gap: 6px; align-items: center; }
+  .row input { width: 90px; text-align: right; }
+  button { font: inherit; border: 1px solid var(--line); background: var(--bg); color: var(--text);
+    border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .hint { color: var(--muted); font-size: 12px; margin: 0; }
+  .msg { font-size: 12px; min-height: 1.4em; }
+  .msg.ok { color: var(--seg); } .msg.bad { color: var(--bad); }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); padding: 0 20px; flex-wrap: wrap; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 4px; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>VirtualKvm · Monitores</h1>
+  <span class="status" id="status">conectando…</span>
+</header>
+<div class="legend">
+  <span><span class="sw" style="background:var(--local-fill);border:1.5px solid var(--local)"></span>Esta máquina (posición de macOS / Windows)</span>
+  <span><span class="sw" style="background:var(--remote-fill);border:2px solid var(--remote)"></span>Monitor remoto (arrastralo)</span>
+  <span><span class="sw" style="background:var(--seg)"></span>Tramo del borde donde pasa el mouse</span>
+</div>
+<main>
+  <section class="card" id="stage"><svg id="svg"></svg></section>
+  <aside class="card" id="panel"><p class="hint">Esperando datos del daemon…</p></aside>
+</main>
+
+<script>
+"use strict";
+const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
+const svg = document.getElementById("svg");
+const panel = document.getElementById("panel");
+const statusEl = document.getElementById("status");
+const NS = "http://www.w3.org/2000/svg";
+const SNAP_PX = 10;          // snapping distance in screen pixels
+
+let snap = null;             // last /api/state
+let selected = null;         // selected client handle
+let draft = {};              // handle -> {local, side, offset, remote}  (unsaved / current edit)
+let drag = null;             // drag state
+let view = null;             // {scale, ox, oy}
+let message = { text: "", cls: "" };
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "x-vkvm-token": token, "content-type": "application/json" } });
+  if (!r.ok) throw new Error(r.status === 401 ? "token inválido: abrí la URL que imprimió `lan-mouse web`" : "HTTP " + r.status);
+  return r.status === 204 ? null : r.json();
+}
+
+function clientName(c) {
+  return c.config.hostname || (c.config.fix_ips[0] ?? ("cliente " + c.handle));
+}
+
+// ---------- layout model ----------
+function horizontal(side) { return side === "left" || side === "right"; }
+
+function currentLayout(c) {
+  if (draft[c.handle]) return draft[c.handle];
+  const link = c.config.link;
+  const local = snap.local;
+  if (link) return { local: link.local_display, side: c.config.pos, offset: link.offset, remote: link.remote_display, linked: true };
+  // no link yet: suggest the display on the configured side
+  const side = c.config.pos;
+  let pick = local[0];
+  for (const d of local) {
+    if (side === "left" && d.x < pick.x) pick = d;
+    if (side === "right" && d.x + d.width > pick.x + pick.width) pick = d;
+    if (side === "top" && d.y < pick.y) pick = d;
+    if (side === "bottom" && d.y + d.height > pick.y + pick.height) pick = d;
+  }
+  return { local: pick ? pick.name : "", side, offset: 0, remote: 0, linked: false };
+}
+
+function findLocal(q) { return snap.local.find(d => d.id === q || d.name.toLowerCase() === String(q).toLowerCase()); }
+
+function remoteSize(c, idx) {
+  const r = c.state.remote_displays[idx];
+  return r ? { w: r.width, h: r.height, known: true } : { w: 1920, h: 1080, known: false };
+}
+
+// remote rect in local desktop coordinates for a layout
+function placeRemote(c, lay) {
+  const L = findLocal(lay.local); if (!L) return null;
+  const { w, h } = remoteSize(c, lay.remote);
+  switch (lay.side) {
+    case "left":   return { x: L.x - w, y: L.y + lay.offset, w, h };
+    case "right":  return { x: L.x + L.width, y: L.y + lay.offset, w, h };
+    case "top":    return { x: L.x + lay.offset, y: L.y - h, w, h };
+    case "bottom": return { x: L.x + lay.offset, y: L.y + L.height, w, h };
+  }
+}
+
+function segment(c, lay) {
+  const L = findLocal(lay.local); const R = placeRemote(c, lay); if (!L || !R) return null;
+  if (horizontal(lay.side)) {
+    const from = Math.max(L.y, R.y), to = Math.min(L.y + L.height, R.y + R.h);
+    const x = lay.side === "left" ? L.x : L.x + L.width;
+    return to > from ? { x1: x, y1: from, x2: x, y2: to, len: to - from } : null;
+  }
+  const from = Math.max(L.x, R.x), to = Math.min(L.x + L.width, R.x + R.w);
+  const y = lay.side === "top" ? L.y : L.y + L.height;
+  return to > from ? { x1: from, y1: y, x2: to, y2: y, len: to - from } : null;
+}
+
+// snap a free-floating remote rect (desktop coords) to the closest local edge
+function snapRemote(c, rx, ry, remoteIdx) {
+  const { w, h } = remoteSize(c, remoteIdx);
+  let best = null;
+  for (const L of snap.local) {
+    const cands = [
+      { side: "left",   dist: Math.abs(rx + w - L.x), along: ry - L.y, len: L.height, rlen: h },
+      { side: "right",  dist: Math.abs(rx - (L.x + L.width)), along: ry - L.y, len: L.height, rlen: h },
+      { side: "top",    dist: Math.abs(ry + h - L.y), along: rx - L.x, len: L.width, rlen: w },
+      { side: "bottom", dist: Math.abs(ry - (L.y + L.height)), along: rx - L.x, len: L.width, rlen: w },
+    ];
+    for (const k of cands) {
+      // must overlap the edge at least a bit
+      const overlap = Math.min(k.len, k.along + k.rlen) - Math.max(0, k.along);
+      if (overlap <= 0) continue;
+      if (!best || k.dist < best.dist) best = { ...k, L };
+    }
+  }
+  if (!best) return null;
+  let offset = Math.round(best.along);
+  const tol = SNAP_PX / view.scale;
+  for (const target of [0, best.len - best.rlen, Math.round((best.len - best.rlen) / 2)]) {
+    if (Math.abs(offset - target) <= tol) { offset = target; break; }
+  }
+  return { local: best.L.name, side: best.side, offset, remote: remoteIdx, linked: true };
+}
+
+// ---------- rendering ----------
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+
+function computeView(rects) {
+  const box = svg.getBoundingClientRect();
+  const W = Math.max(box.width, 300), H = Math.max(box.height, 300);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const r of rects) { minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); }
+  // room to drag a remote display around
+  const padX = 1400, padY = 900;
+  minX -= padX; maxX += padX; minY -= padY; maxY += padY;
+  const scale = Math.min(W / (maxX - minX), H / (maxY - minY));
+  return { scale, ox: (W - (maxX - minX) * scale) / 2 - minX * scale, oy: (H - (maxY - minY) * scale) / 2 - minY * scale, W, H };
+}
+const sx = x => x * view.scale + view.ox;
+const sy = y => y * view.scale + view.oy;
+
+function render() {
+  svg.innerHTML = "";
+  if (!snap) return;
+  const c = snap.clients.find(c => c.handle === selected);
+  const rects = snap.local.map(d => ({ x: d.x, y: d.y, w: d.width, h: d.height }));
+  if (!drag) view = computeView(rects);
+  const box = svg.getBoundingClientRect();
+  svg.setAttribute("viewBox", `0 0 ${view.W} ${view.H}`);
+
+  for (const d of snap.local) {
+    const g = el("g", { class: "local" }, svg);
+    el("rect", { x: sx(d.x), y: sy(d.y), width: d.width * view.scale, height: d.height * view.scale, rx: 4 }, g);
+    const t = el("text", { x: sx(d.x) + 8, y: sy(d.y) + 18 }, g); t.textContent = d.name + (d.primary ? " ★" : "");
+    const s = el("text", { x: sx(d.x) + 8, y: sy(d.y) + 34, class: "sub" }, g); s.textContent = `${d.width}×${d.height} · ${d.scale}x`;
+  }
+  if (!c) return;
+
+  const lay = currentLayout(c);
+  const R = drag ? drag.rect : placeRemote(c, lay);
+  if (!R) return;
+  const seg = drag ? null : segment(c, lay);
+  if (seg) el("line", { class: "seg", x1: sx(seg.x1), y1: sy(seg.y1), x2: sx(seg.x2), y2: sy(seg.y2) }, svg);
+
+  const g = el("g", { class: "remote" + (drag ? " dragging" : "") + (lay.linked ? "" : " unlinked") }, svg);
+  const rect = el("rect", { x: sx(R.x), y: sy(R.y), width: R.w * view.scale, height: R.h * view.scale, rx: 4 }, g);
+  const t = el("text", { x: sx(R.x) + 8, y: sy(R.y) + 18 }, g); t.textContent = `${clientName(c)} · Monitor ${lay.remote + 1}`;
+  const size = remoteSize(c, lay.remote);
+  const s = el("text", { x: sx(R.x) + 8, y: sy(R.y) + 34, class: "sub" }, g);
+  s.textContent = `${size.w}×${size.h}` + (size.known ? "" : " (estimado: conectá una vez)");
+  rect.addEventListener("pointerdown", ev => startDrag(ev, c, R, lay));
+}
+
+function startDrag(ev, c, R, lay) {
+  ev.preventDefault();
+  svg.setPointerCapture(ev.pointerId);
+  drag = { handle: c.handle, start: { x: ev.clientX, y: ev.clientY }, orig: { ...R }, rect: { ...R }, remote: lay.remote };
+  render();
+}
+svg.addEventListener("pointermove", ev => {
+  if (!drag) return;
+  const dx = (ev.clientX - drag.start.x) / view.scale, dy = (ev.clientY - drag.start.y) / view.scale;
+  drag.rect.x = drag.orig.x + dx; drag.rect.y = drag.orig.y + dy;
+  render();
+});
+svg.addEventListener("pointerup", async () => {
+  if (!drag) return;
+  const c = snap.clients.find(c => c.handle === drag.handle);
+  const lay = snapRemote(c, drag.rect.x, drag.rect.y, drag.remote);
+  drag = null;
+  if (!lay) { setMsg("Soltalo pegado a un borde de alguno de tus monitores.", "bad"); render(); return; }
+  draft[c.handle] = lay;
+  render(); renderPanel();
+  await save(c);
+});
+
+// ---------- side panel ----------
+function setMsg(text, cls) { message = { text, cls }; const m = document.getElementById("msg"); if (m) { m.textContent = text; m.className = "msg " + cls; } }
+
+function renderPanel() {
+  if (!snap) return;
+  if (!snap.clients.length) { panel.innerHTML = '<p class="hint">No hay clientes configurados en lan-mouse.</p>'; return; }
+  if (!snap.clients.some(c => c.handle === selected)) selected = snap.clients[0].handle;
+  const c = snap.clients.find(c => c.handle === selected);
+  const lay = currentLayout(c);
+  const seg = segment(c, lay);
+  const remotes = c.state.remote_displays.length ? c.state.remote_displays : [{ width: 1920, height: 1080 }];
+  const active = document.activeElement && document.activeElement.id;
+
+  panel.innerHTML = `
+    <h2>Cliente</h2>
+    <label>Máquina
+      <select id="client">${snap.clients.map(x => `<option value="${x.handle}" ${x.handle === selected ? "selected" : ""}>${clientName(x)} ${x.state.alive ? "· conectada" : "· sin conexión"}</option>`).join("")}</select>
+    </label>
+    <label>Monitor de esta máquina
+      <select id="local">${snap.local.map(d => `<option ${d.name === lay.local ? "selected" : ""}>${d.name}</option>`).join("")}</select>
+    </label>
+    <label>Lado
+      <select id="side">${["left", "right", "top", "bottom"].map(s => `<option value="${s}" ${s === lay.side ? "selected" : ""}>${{ left: "izquierda", right: "derecha", top: "arriba", bottom: "abajo" }[s]}</option>`).join("")}</select>
+    </label>
+    <label>Monitor remoto
+      <select id="remote">${remotes.map((r, i) => `<option value="${i}" ${i === lay.remote ? "selected" : ""}>Monitor ${i + 1} · ${r.width}×${r.height}</option>`).join("")}</select>
+    </label>
+    <label>Desplazamiento (px) — ${horizontal(lay.side) ? "positivo = más abajo" : "positivo = más a la derecha"}
+      <div class="row">
+        <button data-d="-10">−10</button><button data-d="-1">−1</button>
+        <input id="offset" type="number" value="${lay.offset}">
+        <button data-d="1">+1</button><button data-d="10">+10</button>
+      </div>
+    </label>
+    <p class="hint">${seg ? `El mouse pasa por un tramo de <b>${Math.round(seg.len)} px</b> del borde.` : '<span style="color:var(--bad)">Los monitores no se tocan: no hay por dónde pasar.</span>'}
+      ${lay.linked ? "" : "<br>Todavía no hay link guardado: se usa el borde de todo el escritorio."}</p>
+    <div class="row">
+      <button class="primary" id="save">Guardar</button>
+      <button id="clear" ${c.config.link ? "" : "disabled"}>Quitar link</button>
+    </div>
+    <div id="msg" class="msg ${message.cls}">${message.text}</div>
+    <p class="hint">Arrastrá el monitor naranja hasta el borde de uno de los tuyos. Se pega solo y se alinea arriba, abajo o al centro. Después ajustalo fino con los botones.</p>`;
+
+  const upd = patch => { draft[c.handle] = { ...currentLayout(c), ...patch, linked: true }; render(); renderPanel(); };
+  panel.querySelector("#client").onchange = e => { selected = Number(e.target.value); render(); renderPanel(); };
+  panel.querySelector("#local").onchange = e => upd({ local: e.target.value });
+  panel.querySelector("#side").onchange = e => upd({ side: e.target.value });
+  panel.querySelector("#remote").onchange = e => upd({ remote: Number(e.target.value) });
+  const off = panel.querySelector("#offset");
+  off.onchange = () => upd({ offset: Math.round(Number(off.value) || 0) });
+  panel.querySelectorAll("button[data-d]").forEach(b => b.onclick = () => upd({ offset: currentLayout(c).offset + Number(b.dataset.d) }));
+  panel.querySelector("#save").onclick = () => save(c);
+  panel.querySelector("#clear").onclick = () => clearLink(c);
+  if (active === "offset") { const o = panel.querySelector("#offset"); o.focus(); o.select(); }
+}
+
+async function save(c) {
+  const lay = currentLayout(c);
+  if (!segment(c, lay)) { setMsg("No se guardó: los monitores no se tocan.", "bad"); return; }
+  try {
+    await api("/api/link", { method: "POST", body: JSON.stringify({
+      handle: c.handle, position: lay.side,
+      link: { local_display: lay.local, remote_display: lay.remote, offset: lay.offset } }) });
+    delete draft[c.handle];
+    setMsg("Guardado ✓", "ok");
+    await refresh();
+  } catch (e) { setMsg("Error: " + e.message, "bad"); }
+}
+
+async function clearLink(c) {
+  try {
+    await api("/api/link", { method: "POST", body: JSON.stringify({ handle: c.handle, position: c.config.pos, link: null }) });
+    delete draft[c.handle];
+    setMsg("Link quitado: vuelve a usarse el borde de todo el escritorio.", "ok");
+    await refresh();
+  } catch (e) { setMsg("Error: " + e.message, "bad"); }
+}
+
+// ---------- polling ----------
+async function refresh() {
+  try {
+    snap = await api("/api/state");
+    statusEl.textContent = snap.connected ? `daemon conectado · ${snap.local.length} monitor(es) locales · ${snap.clients.length} cliente(s)` : "daemon desconectado";
+  } catch (e) { statusEl.textContent = e.message; return; }
+  if (!drag) { render(); if (!panel.contains(document.activeElement) || document.activeElement.tagName === "BUTTON") renderPanel(); }
+}
+window.addEventListener("resize", () => { if (!drag) render(); });
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>

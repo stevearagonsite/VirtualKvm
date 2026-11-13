@@ -34,6 +34,7 @@ impl ClientManager {
             pos: config_client.pos,
             cmd: config_client.enter_hook,
             leave_cmd: config_client.leave_hook,
+            link: config_client.link,
         };
         let state = ClientState {
             active: config_client.active,
@@ -295,6 +296,46 @@ impl ClientManager {
     pub(crate) fn set_alive(&self, handle: ClientHandle, alive: bool) {
         if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {
             s.alive = alive;
+        }
+    }
+
+    /// (VirtualKvm) store one display announced by the peer
+    pub(crate) fn set_remote_display(
+        &self,
+        handle: ClientHandle,
+        index: u8,
+        count: u8,
+        display: lan_mouse_ipc::DisplayInfo,
+    ) {
+        if let Some((_, s)) = self.clients.borrow_mut().get_mut(handle as usize) {
+            let count = count as usize;
+            if s.remote_displays.len() != count {
+                s.remote_displays.resize_with(count, || display.clone());
+            }
+            if let Some(d) = s.remote_displays.get_mut(index as usize) {
+                *d = display;
+            }
+        }
+    }
+
+    pub(crate) fn remote_displays(&self, handle: ClientHandle) -> Vec<lan_mouse_ipc::DisplayInfo> {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .map(|(_, s)| s.remote_displays.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn get_link(&self, handle: ClientHandle) -> Option<lan_mouse_ipc::DisplayLink> {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .and_then(|(c, _)| c.link.clone())
+    }
+
+    pub(crate) fn set_link(&self, handle: ClientHandle, link: Option<lan_mouse_ipc::DisplayLink>) {
+        if let Some((c, _)) = self.clients.borrow_mut().get_mut(handle as usize) {
+            c.link = link;
         }
     }
 

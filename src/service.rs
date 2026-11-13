@@ -98,7 +98,12 @@ impl Service {
 
         // input capture + emulation
         let capture_backend = config.capture_backend().map(|b| b.into());
-        let capture = Capture::new(capture_backend, conn, config.release_bind());
+        let capture = Capture::new(
+            capture_backend,
+            conn,
+            config.release_bind(),
+            client_manager.clone(),
+        );
         let emulation_backend = config.emulation_backend().map(|b| b.into());
         let emulation = Emulation::new(emulation_backend, listener);
 
@@ -189,6 +194,16 @@ impl Service {
             FrontendRequest::EnableCapture => self.capture.reenable(),
             FrontendRequest::EnableEmulation => self.emulation.reenable(),
             FrontendRequest::Enumerate() => self.enumerate(),
+            FrontendRequest::GetDisplays => {
+                self.notify_frontend(FrontendEvent::Displays(vkvm_displays::list()))
+            }
+            FrontendRequest::UpdateLink(handle, link) => {
+                log::info!("client ({handle}) link: {link:?}");
+                self.client_manager.set_link(handle, link);
+                self.capture.update_link(handle);
+                self.broadcast_client(handle);
+                self.save_config();
+            }
             FrontendRequest::UpdateFixIps(handle, fix_ips) => {
                 self.update_fix_ips(handle, fix_ips);
                 self.save_config();
@@ -233,6 +248,7 @@ impl Service {
                 active: s.active,
                 enter_hook: c.cmd,
                 leave_hook: c.leave_cmd,
+                link: c.link,
             })
             .collect();
         self.config.set_clients(clients);
@@ -319,6 +335,19 @@ impl Service {
             EmulationEvent::ReleaseNotify => self.capture.release(),
             EmulationEvent::Connected { addr, fingerprint } => {
                 self.notify_frontend(FrontendEvent::DeviceConnected { addr, fingerprint });
+            }
+            EmulationEvent::PeerDisplay {
+                addr,
+                index,
+                count,
+                display,
+            } => {
+                log::info!("{addr} display {index}/{count}: {display:?}");
+                if let Some(handle) = self.client_manager.get_client(addr) {
+                    self.client_manager
+                        .set_remote_display(handle, index, count, display);
+                    self.broadcast_client(handle);
+                }
             }
             EmulationEvent::PeerHello { addr, commit } => {
                 // Map the peer's source addr back to its client handle

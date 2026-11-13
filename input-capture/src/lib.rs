@@ -39,6 +39,9 @@ pub type CaptureHandle = u64;
 pub enum CaptureEvent {
     /// capture on this capture handle is now active
     Begin,
+    /// (VirtualKvm) like [`CaptureEvent::Begin`], with the point (global
+    /// coordinates) where the cursor crossed the barrier
+    BeginAt { x: f64, y: f64 },
     /// input event coming from capture handle
     Input(Event),
 }
@@ -47,7 +50,46 @@ impl Display for CaptureEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CaptureEvent::Begin => write!(f, "begin capture"),
+            CaptureEvent::BeginAt { x, y } => write!(f, "begin capture at ({x:.0}, {y:.0})"),
             CaptureEvent::Input(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// (VirtualKvm) restricts the barrier of a position to one display and to
+/// part of that display's edge. See `docs/design/layout-gui.md`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Segment {
+    /// display (global coordinates) whose edge is the barrier
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// active range `[from, to)` along the edge (y for left/right, x for top/bottom)
+    pub from: f64,
+    pub to: f64,
+}
+
+impl Segment {
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+
+    fn in_range(&self, v: f64) -> bool {
+        v >= self.from && v < self.to
+    }
+
+    /// whether moving from `(x, y)` by `(dx, dy)` crosses the barrier at `pos`
+    pub fn crossed(&self, pos: Position, x: f64, y: f64, dx: f64, dy: f64) -> bool {
+        if !self.contains(x, y) {
+            return false;
+        }
+        let (nx, ny) = (x + dx, y + dy);
+        match pos {
+            Position::Left => nx < self.x && self.in_range(y),
+            Position::Right => nx >= self.x + self.width && self.in_range(y),
+            Position::Top => ny < self.y && self.in_range(x),
+            Position::Bottom => ny >= self.y + self.height && self.in_range(x),
         }
     }
 }
@@ -163,6 +205,32 @@ impl InputCapture {
             self.capture.destroy(pos).await?;
         }
         Ok(())
+    }
+
+    /// (VirtualKvm) restrict the barrier of client `id` to a display segment
+    /// (or back to the whole desktop edge with `None`)
+    pub async fn set_segment(
+        &mut self,
+        id: CaptureHandle,
+        segment: Option<Segment>,
+    ) -> Result<(), CaptureError> {
+        match self.id_map.get(&id) {
+            Some(&pos) => {
+                self.capture.set_segment(pos, segment);
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// (VirtualKvm) release the mouse, placing the cursor at `(x, y)`
+    pub async fn release_at(&mut self, x: f64, y: f64) -> Result<(), CaptureError> {
+        self.pressed_keys.clear();
+        if self.capture.release_at(x, y) {
+            Ok(())
+        } else {
+            self.capture.release().await
+        }
     }
 
     /// release mouse
@@ -289,6 +357,16 @@ trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + U
 
     /// destroy the input capture
     async fn terminate(&mut self) -> Result<(), CaptureError>;
+
+    /// (VirtualKvm) restrict the barrier at `pos` to a display segment.
+    /// Backends without support keep using the whole desktop edge.
+    fn set_segment(&mut self, _pos: Position, _segment: Option<Segment>) {}
+
+    /// (VirtualKvm) release the mouse, placing the cursor at `(x, y)`.
+    /// Returns `false` if the backend can't, so the caller does a plain release.
+    fn release_at(&mut self, _x: f64, _y: f64) -> bool {
+        false
+    }
 }
 
 async fn create_backend(

@@ -153,6 +153,11 @@ impl InputEmulation {
         }
     }
 
+    /// (VirtualKvm) move the cursor to an absolute position (global desktop coordinates)
+    pub async fn warp(&mut self, x: f64, y: f64) -> Result<(), EmulationError> {
+        self.emulation.warp(x, y).await
+    }
+
     pub async fn create(&mut self, handle: EmulationHandle) -> bool {
         if self.handles.insert(handle) {
             self.pressed_keys.insert(handle, HashSet::new());
@@ -237,4 +242,9 @@ trait Emulation: Send {
     async fn create(&mut self, handle: EmulationHandle);
     async fn destroy(&mut self, handle: EmulationHandle);
     async fn terminate(&mut self);
+    /// (VirtualKvm) move the cursor to an absolute position in this machine's
+    /// global desktop coordinates. Backends that can't do it ignore the request.
+    async fn warp(&mut self, _x: f64, _y: f64) -> Result<(), EmulationError> {
+        Ok(())
+    }
 }

@@ -128,6 +128,21 @@ impl TryFrom<&str> for Position {
     }
 }
 
+pub use vkvm_displays::Display as DisplayInfo;
+
+/// (VirtualKvm) ties a client to one local display edge and one remote display.
+/// See `docs/design/layout-gui.md`.
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub struct DisplayLink {
+    /// local display id or name the client is attached to
+    pub local_display: String,
+    /// index of the remote display (as announced by the peer)
+    pub remote_display: u8,
+    /// position of the remote display along the shared edge, relative to the
+    /// start (top / left) of the local display, in local logical pixels
+    pub offset: i32,
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     /// hostname of this client
@@ -142,6 +157,8 @@ pub struct ClientConfig {
     pub cmd: Option<String>,
     /// leave hook
     pub leave_cmd: Option<String>,
+    #[serde(default)]
+    pub link: Option<DisplayLink>,
 }
 
 impl Default for ClientConfig {
@@ -153,6 +170,7 @@ impl Default for ClientConfig {
             pos: Default::default(),
             cmd: None,
             leave_cmd: None,
+            link: None,
         }
     }
 }
@@ -185,6 +203,9 @@ pub struct ClientState {
     /// that predates the Hello event. The frontend uses this to
     /// soft-warn on version mismatch.
     pub peer_commit: Option<[u8; 8]>,
+    /// (VirtualKvm) displays announced by the peer, indexed by `DisplayInfo::index`
+    #[serde(default)]
+    pub remote_displays: Vec<DisplayInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +247,8 @@ pub enum FrontendEvent {
     IncomingDisconnected(SocketAddr),
     /// failed connection attempt (approval for fingerprint required)
     ConnectionAttempt { fingerprint: String },
+    /// (VirtualKvm) the displays of this machine
+    Displays(Vec<DisplayInfo>),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -266,6 +289,10 @@ pub enum FrontendRequest {
     UpdateLeaveHook(u64, Option<String>),
     /// save config file
     SaveConfiguration,
+    /// (VirtualKvm) request [`FrontendEvent::Displays`]
+    GetDisplays,
+    /// (VirtualKvm) attach a client to a local display edge / remote display
+    UpdateLink(ClientHandle, Option<DisplayLink>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

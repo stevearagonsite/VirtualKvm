@@ -17,7 +17,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT_0, KEYEVENTF_EXTENDEDKEY, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, SendInput,
 };
-use windows::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
+use windows::Win32::UI::WindowsAndMessaging::{SetCursorPos, XBUTTON1, XBUTTON2};
 
 use super::{Emulation, EmulationHandle};
 
@@ -80,6 +80,13 @@ impl Emulation for WindowsEmulation {
     async fn destroy(&mut self, _handle: EmulationHandle) {}
 
     async fn terminate(&mut self) {}
+
+    async fn warp(&mut self, x: f64, y: f64) -> Result<(), EmulationError> {
+        if let Err(e) = unsafe { SetCursorPos(x.round() as i32, y.round() as i32) } {
+            log::warn!("SetCursorPos({x}, {y}) failed: {e}");
+        }
+        Ok(())
+    }
 }
 
 impl WindowsEmulation {

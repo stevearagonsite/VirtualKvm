@@ -17,7 +17,7 @@ use toml;
 use toml_edit::{self, DocumentMut};
 
 use lan_mouse_cli::CliArgs;
-use lan_mouse_ipc::{DEFAULT_PORT, Position};
+use lan_mouse_ipc::{DEFAULT_PORT, DisplayLink, Position};
 
 use input_event::scancode::{
     self,
@@ -81,6 +81,7 @@ struct TomlClient {
     activate_on_startup: Option<bool>,
     enter_hook: Option<String>,
     leave_hook: Option<String>,
+    link: Option<DisplayLink>,
 }
 
 impl ConfigToml {
@@ -128,6 +129,8 @@ pub enum Command {
     Cli(CliArgs),
     /// run in daemon mode
     Daemon,
+    /// (VirtualKvm) web UI on localhost: display layout editor
+    Web(vkvm_web::WebArgs),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
@@ -277,6 +280,7 @@ pub struct ConfigClient {
     pub active: bool,
     pub enter_hook: Option<String>,
     pub leave_hook: Option<String>,
+    pub link: Option<DisplayLink>,
 }
 
 impl From<TomlClient> for ConfigClient {
@@ -288,6 +292,7 @@ impl From<TomlClient> for ConfigClient {
         let ips = HashSet::from_iter(toml.ips.into_iter().flatten());
         let port = toml.port.unwrap_or(DEFAULT_PORT);
         let pos = toml.position.unwrap_or_default();
+        let link = toml.link;
         Self {
             ips,
             hostname,
@@ -296,6 +301,7 @@ impl From<TomlClient> for ConfigClient {
             active,
             enter_hook,
             leave_hook,
+            link,
         }
     }
 }
@@ -316,6 +322,7 @@ impl From<ConfigClient> for TomlClient {
         let activate_on_startup = if client.active { Some(true) } else { None };
         let enter_hook = client.enter_hook;
         let leave_hook = client.leave_hook;
+        let link = client.link;
         Self {
             hostname,
             host_name,
@@ -325,6 +332,7 @@ impl From<ConfigClient> for TomlClient {
             activate_on_startup,
             enter_hook,
             leave_hook,
+            link,
         }
     }
 }
