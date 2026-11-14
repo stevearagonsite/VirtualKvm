@@ -58,6 +58,9 @@ pub enum IpcError {
 
 pub const DEFAULT_PORT: u16 = 4242;
 
+/// (VirtualKvm) loopback port of the frontend IPC on Windows (upstream lan-mouse uses 5252)
+pub const IPC_ADDR: &str = "127.0.0.1:5262";
+
 #[derive(Debug, Default, Eq, Hash, PartialEq, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Position {
@@ -130,17 +133,24 @@ impl TryFrom<&str> for Position {
 
 pub use vkvm_displays::Display as DisplayInfo;
 
-/// (VirtualKvm) ties a client to one local display edge and one remote display.
+/// (VirtualKvm) where the peer's displays sit in our virtual desktop: a point
+/// `(x, y)` of the peer's desktop appears at `(x + dx, y + dy)` of ours.
+/// The cursor crosses wherever a peer display touches one of ours.
 /// See `docs/design/layout-gui.md`.
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
-pub struct DisplayLink {
-    /// local display id or name the client is attached to
-    pub local_display: String,
-    /// index of the remote display (as announced by the peer)
-    pub remote_display: u8,
-    /// position of the remote display along the shared edge, relative to the
-    /// start (top / left) of the local display, in local logical pixels
-    pub offset: i32,
+#[derive(Debug, Eq, PartialEq, Clone, Copy, Serialize, Deserialize)]
+pub struct DisplayLayout {
+    pub dx: i32,
+    pub dy: i32,
+}
+
+impl DisplayLayout {
+    /// the same layout seen from the peer
+    pub fn mirrored(self) -> Self {
+        Self {
+            dx: -self.dx,
+            dy: -self.dy,
+        }
+    }
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -158,7 +168,7 @@ pub struct ClientConfig {
     /// leave hook
     pub leave_cmd: Option<String>,
     #[serde(default)]
-    pub link: Option<DisplayLink>,
+    pub layout: Option<DisplayLayout>,
 }
 
 impl Default for ClientConfig {
@@ -170,7 +180,7 @@ impl Default for ClientConfig {
             pos: Default::default(),
             cmd: None,
             leave_cmd: None,
-            link: None,
+            layout: None,
         }
     }
 }
@@ -291,8 +301,8 @@ pub enum FrontendRequest {
     SaveConfiguration,
     /// (VirtualKvm) request [`FrontendEvent::Displays`]
     GetDisplays,
-    /// (VirtualKvm) attach a client to a local display edge / remote display
-    UpdateLink(ClientHandle, Option<DisplayLink>),
+    /// (VirtualKvm) place the peer's displays (also sent to the peer, mirrored)
+    UpdateLayout(ClientHandle, Option<DisplayLayout>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -312,7 +322,7 @@ impl From<Status> for bool {
 }
 
 #[cfg(unix)]
-const LAN_MOUSE_SOCKET_NAME: &str = "lan-mouse-socket.sock";
+const LAN_MOUSE_SOCKET_NAME: &str = "vkvm.sock";
 
 #[derive(Debug, Error)]
 pub enum SocketPathError {
@@ -350,5 +360,5 @@ pub fn is_service_running() -> bool {
 /// Check if a lan-mouse service is already running by probing the IPC socket.
 #[cfg(windows)]
 pub fn is_service_running() -> bool {
-    std::net::TcpStream::connect("127.0.0.1:5252").is_ok()
+    std::net::TcpStream::connect(IPC_ADDR).is_ok()
 }

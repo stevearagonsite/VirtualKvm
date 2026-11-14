@@ -18,17 +18,21 @@ $ErrorActionPreference = 'Stop'
 
 $base = "C:\Users\$User\vkvm"
 $bin  = "$base\bin"
-$exe  = "$bin\lan-mouse.exe"
+$exe  = "$bin\vkvm.exe"
 $log  = "$base\daemon.log"
 $trayLog = "$base\tray.log"
-$task = 'vkvm-lanmouse-daemon'
-$src  = "$Repo\target\release\lan-mouse.exe"
+$task = 'VirtualKvm'
+$src  = "$Repo\target\release\vkvm.exe"
 
 if (-not (Test-Path $src)) { throw "no existe ${src}: compila antes con cargo build --release --no-default-features" }
 
 # detener lo que este corriendo antes de reemplazar el binario
 Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
-Get-Process lan-mouse -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process vkvm, lan-mouse -ErrorAction SilentlyContinue | Stop-Process -Force
+# antes del rebranding: tarea, reglas y binario se llamaban lan-mouse
+Unregister-ScheduledTask -TaskName 'vkvm-lanmouse-daemon' -Confirm:$false -ErrorAction SilentlyContinue
+Get-NetFirewallRule -DisplayName 'VirtualKvm lan-mouse *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+Remove-Item "$bin\lan-mouse.exe" -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 
 New-Item -ItemType Directory -Force $bin | Out-Null
@@ -36,7 +40,7 @@ Copy-Item $src $exe -Force
 
 # firewall: solo LAN y solo este ejecutable
 foreach ($p in 'UDP', 'TCP') {
-    $n = "VirtualKvm lan-mouse $p 4242"
+    $n = "VirtualKvm $p 4242"
     Get-NetFirewallRule -DisplayName $n -ErrorAction SilentlyContinue | Remove-NetFirewallRule
     New-NetFirewallRule -DisplayName $n -Direction Inbound -Action Allow -Protocol $p -LocalPort 4242 `
         -Program $exe -Profile Private -RemoteAddress LocalSubnet | Out-Null
@@ -59,4 +63,4 @@ Start-ScheduledTask -TaskName $task
 Start-Sleep -Seconds 3
 $t = Get-ScheduledTask -TaskName $task
 "tarea: $($t.State) | disparador: al iniciar sesion de $User"
-Get-Process lan-mouse -ErrorAction SilentlyContinue | Select-Object Id, SessionId, Path | Format-Table | Out-String
+Get-Process vkvm -ErrorAction SilentlyContinue | Select-Object Id, SessionId, Path | Format-Table | Out-String

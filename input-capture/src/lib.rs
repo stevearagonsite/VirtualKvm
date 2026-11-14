@@ -40,8 +40,9 @@ pub enum CaptureEvent {
     /// capture on this capture handle is now active
     Begin,
     /// (VirtualKvm) like [`CaptureEvent::Begin`], with the point (global
-    /// coordinates) where the cursor crossed the barrier
-    BeginAt { x: f64, y: f64 },
+    /// coordinates) where the cursor crossed the barrier and the side of the
+    /// display it crossed
+    BeginAt { x: f64, y: f64, side: Position },
     /// input event coming from capture handle
     Input(Event),
 }
@@ -50,16 +51,20 @@ impl Display for CaptureEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CaptureEvent::Begin => write!(f, "begin capture"),
-            CaptureEvent::BeginAt { x, y } => write!(f, "begin capture at ({x:.0}, {y:.0})"),
+            CaptureEvent::BeginAt { x, y, side } => {
+                write!(f, "begin capture at ({x:.0}, {y:.0}) through {side}")
+            }
             CaptureEvent::Input(e) => write!(f, "{e}"),
         }
     }
 }
 
-/// (VirtualKvm) restricts the barrier of a position to one display and to
-/// part of that display's edge. See `docs/design/layout-gui.md`.
+/// (VirtualKvm) part of one display edge that acts as a barrier.
+/// A client can have several (see `docs/design/layout-gui.md`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {
+    /// which edge of the display
+    pub side: Position,
     /// display (global coordinates) whose edge is the barrier
     pub x: f64,
     pub y: f64,
@@ -71,6 +76,17 @@ pub struct Segment {
 }
 
 impl Segment {
+    /// whether `(x, y)` lies on this display, or on the barrier stretch of its edge
+    pub fn contains_point(&self, x: f64, y: f64) -> bool {
+        self.contains(x, y) || {
+            let along = match self.side {
+                Position::Left | Position::Right => y,
+                Position::Top | Position::Bottom => x,
+            };
+            self.in_range(along)
+        }
+    }
+
     fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
     }
@@ -79,13 +95,13 @@ impl Segment {
         v >= self.from && v < self.to
     }
 
-    /// whether moving from `(x, y)` by `(dx, dy)` crosses the barrier at `pos`
-    pub fn crossed(&self, pos: Position, x: f64, y: f64, dx: f64, dy: f64) -> bool {
+    /// whether moving from `(x, y)` by `(dx, dy)` crosses this barrier
+    pub fn crossed(&self, x: f64, y: f64, dx: f64, dy: f64) -> bool {
         if !self.contains(x, y) {
             return false;
         }
         let (nx, ny) = (x + dx, y + dy);
-        match pos {
+        match self.side {
             Position::Left => nx < self.x && self.in_range(y),
             Position::Right => nx >= self.x + self.width && self.in_range(y),
             Position::Top => ny < self.y && self.in_range(x),
@@ -207,20 +223,17 @@ impl InputCapture {
         Ok(())
     }
 
-    /// (VirtualKvm) restrict the barrier of client `id` to a display segment
+    /// (VirtualKvm) restrict the barrier of client `id` to display segments
     /// (or back to the whole desktop edge with `None`)
-    pub async fn set_segment(
+    pub async fn set_segments(
         &mut self,
         id: CaptureHandle,
-        segment: Option<Segment>,
+        segments: Option<Vec<Segment>>,
     ) -> Result<(), CaptureError> {
-        match self.id_map.get(&id) {
-            Some(&pos) => {
-                self.capture.set_segment(pos, segment);
-                Ok(())
-            }
-            None => Ok(()),
+        if let Some(&pos) = self.id_map.get(&id) {
+            self.capture.set_segments(pos, segments);
         }
+        Ok(())
     }
 
     /// (VirtualKvm) release the mouse, placing the cursor at `(x, y)`
@@ -360,7 +373,7 @@ trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + U
 
     /// (VirtualKvm) restrict the barrier at `pos` to a display segment.
     /// Backends without support keep using the whole desktop edge.
-    fn set_segment(&mut self, _pos: Position, _segment: Option<Segment>) {}
+    fn set_segments(&mut self, _pos: Position, _segments: Option<Vec<Segment>>) {}
 
     /// (VirtualKvm) release the mouse, placing the cursor at `(x, y)`.
     /// Returns `false` if the backend can't, so the caller does a plain release.

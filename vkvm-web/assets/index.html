@@ -61,8 +61,8 @@
 </header>
 <div class="legend">
   <span><span class="sw" style="background:var(--local-fill);border:1.5px solid var(--local)"></span>Esta máquina (posición de macOS / Windows)</span>
-  <span><span class="sw" style="background:var(--remote-fill);border:2px solid var(--remote)"></span>Monitor remoto (arrastralo)</span>
-  <span><span class="sw" style="background:var(--seg)"></span>Tramo del borde donde pasa el mouse</span>
+  <span><span class="sw" style="background:var(--remote-fill);border:2px solid var(--remote)"></span>Monitores de la otra máquina (arrastralos juntos)</span>
+  <span><span class="sw" style="background:var(--seg)"></span>Bordes por donde pasa el mouse</span>
 </div>
 <main>
   <section class="card" id="stage"><svg id="svg"></svg></section>
@@ -71,260 +71,195 @@
 
 <script>
 "use strict";
+// VirtualKvm layout editor (layout v2): the peer's displays are placed as a group
+// at local = remote + (dx, dy); the cursor crosses wherever displays touch.
 const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
 const svg = document.getElementById("svg");
 const panel = document.getElementById("panel");
 const statusEl = document.getElementById("status");
 const NS = "http://www.w3.org/2000/svg";
-const SNAP_PX = 10;          // snapping distance in screen pixels
+const SNAP_PX = 12;   // snapping distance in screen pixels
+const TOUCH = 2;      // px under which two edges touch (same as the daemon)
 
-let snap = null;             // last /api/state
-let selected = null;         // selected client handle
-let draft = {};              // handle -> {local, side, offset, remote}  (unsaved / current edit)
-let drag = null;             // drag state
-let view = null;             // {scale, ox, oy}
+let snap = null, selected = null, drag = null, view = null;
+let draft = {};       // handle -> {dx, dy} not saved yet
 let message = { text: "", cls: "" };
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { "x-vkvm-token": token, "content-type": "application/json" } });
-  if (!r.ok) throw new Error(r.status === 401 ? "token inválido: abrí la URL que imprimió `lan-mouse web`" : "HTTP " + r.status);
+  if (!r.ok) throw new Error(r.status === 401 ? "token inválido: abrí la URL que imprimió `vkvm web`" : "HTTP " + r.status);
   return r.status === 204 ? null : r.json();
 }
+const clientName = c => c.config.hostname || (c.config.fix_ips[0] ?? ("cliente " + c.handle));
+const rect = d => ({ x: d.x, y: d.y, w: d.width, h: d.height });
 
-function clientName(c) {
-  return c.config.hostname || (c.config.fix_ips[0] ?? ("cliente " + c.handle));
+// ---------- model ----------
+function remotes(c) {
+  const r = c.state.remote_displays;
+  return r.length ? r.map((d, i) => ({ ...rect(d), label: d.name || `Monitor ${i + 1}`, known: true }))
+                  : [{ x: 0, y: 0, w: 1920, h: 1080, label: "Monitor 1", known: false }];
 }
-
-// ---------- layout model ----------
-function horizontal(side) { return side === "left" || side === "right"; }
-
-function currentLayout(c) {
-  if (draft[c.handle]) return draft[c.handle];
-  const link = c.config.link;
-  const local = snap.local;
-  if (link) return { local: link.local_display, side: c.config.pos, offset: link.offset, remote: link.remote_display, linked: true };
-  // no link yet: suggest the display on the configured side
+function bbox(rs) {
+  return rs.reduce((b, r) => ({ x0: Math.min(b.x0, r.x), y0: Math.min(b.y0, r.y), x1: Math.max(b.x1, r.x + r.w), y1: Math.max(b.y1, r.y + r.h) }),
+    { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity });
+}
+function layoutOf(c) {
+  if (draft[c.handle]) return { ...draft[c.handle], saved: false };
+  if (c.config.layout) return { ...c.config.layout, saved: true };
+  // no layout yet: suggest the peer on the configured side of our desktop
+  const L = bbox(snap.local.map(rect)), R = bbox(remotes(c));
   const side = c.config.pos;
-  let pick = local[0];
-  for (const d of local) {
-    if (side === "left" && d.x < pick.x) pick = d;
-    if (side === "right" && d.x + d.width > pick.x + pick.width) pick = d;
-    if (side === "top" && d.y < pick.y) pick = d;
-    if (side === "bottom" && d.y + d.height > pick.y + pick.height) pick = d;
-  }
-  return { local: pick ? pick.name : "", side, offset: 0, remote: 0, linked: false };
+  const dx = side === "left" ? L.x0 - R.x1 : side === "right" ? L.x1 - R.x0 : L.x0 - R.x0;
+  const dy = side === "top" ? L.y0 - R.y1 : side === "bottom" ? L.y1 - R.y0 : L.y0 - R.y0;
+  return { dx, dy, saved: false, suggested: true };
 }
+const placed = (c, lay) => remotes(c).map(r => ({ ...r, x: r.x + lay.dx, y: r.y + lay.dy }));
 
-function findLocal(q) { return snap.local.find(d => d.id === q || d.name.toLowerCase() === String(q).toLowerCase()); }
-
-function remoteSize(c, idx) {
-  const r = c.state.remote_displays[idx];
-  return r ? { w: r.width, h: r.height, known: true } : { w: 1920, h: 1080, known: false };
+function contacts(c, lay) {
+  const out = [];
+  for (const L of snap.local.map(rect)) for (const R of placed(c, lay)) {
+    const yo = [Math.max(L.y, R.y), Math.min(L.y + L.h, R.y + R.h)];
+    const xo = [Math.max(L.x, R.x), Math.min(L.x + L.w, R.x + R.w)];
+    const cand = [
+      ["left", Math.abs(R.x + R.w - L.x), yo, L.x], ["right", Math.abs(R.x - (L.x + L.w)), yo, L.x + L.w],
+      ["top", Math.abs(R.y + R.h - L.y), xo, L.y], ["bottom", Math.abs(R.y - (L.y + L.h)), xo, L.y + L.h]];
+    for (const [side, gap, [from, to], edge] of cand)
+      if (gap <= TOUCH && to > from) out.push({ side, from, to, edge });
+  }
+  return out;
 }
-
-// remote rect in local desktop coordinates for a layout
-function placeRemote(c, lay) {
-  const L = findLocal(lay.local); if (!L) return null;
-  const { w, h } = remoteSize(c, lay.remote);
-  switch (lay.side) {
-    case "left":   return { x: L.x - w, y: L.y + lay.offset, w, h };
-    case "right":  return { x: L.x + L.width, y: L.y + lay.offset, w, h };
-    case "top":    return { x: L.x + lay.offset, y: L.y - h, w, h };
-    case "bottom": return { x: L.x + lay.offset, y: L.y + L.height, w, h };
-  }
+function overlaps(c, lay) {
+  return placed(c, lay).some(R => snap.local.map(rect).some(L =>
+    Math.min(L.x + L.w, R.x + R.w) - Math.max(L.x, R.x) > TOUCH && Math.min(L.y + L.h, R.y + R.h) - Math.max(L.y, R.y) > TOUCH));
 }
-
-function segment(c, lay) {
-  const L = findLocal(lay.local); const R = placeRemote(c, lay); if (!L || !R) return null;
-  if (horizontal(lay.side)) {
-    const from = Math.max(L.y, R.y), to = Math.min(L.y + L.height, R.y + R.h);
-    const x = lay.side === "left" ? L.x : L.x + L.width;
-    return to > from ? { x1: x, y1: from, x2: x, y2: to, len: to - from } : null;
+// magnetic snapping of the dragged group to local edges (each axis independently)
+function snapLayout(c, lay) {
+  const tol = SNAP_PX / view.scale, Ls = snap.local.map(rect), Rs = placed(c, lay);
+  let bx = null, by = null;
+  for (const L of Ls) for (const R of Rs) {
+    for (const d of [L.x - (R.x + R.w), L.x + L.w - R.x, L.x - R.x, L.x + L.w - (R.x + R.w)])
+      if (Math.abs(d) <= tol && (bx === null || Math.abs(d) < Math.abs(bx))) bx = d;
+    for (const d of [L.y - (R.y + R.h), L.y + L.h - R.y, L.y - R.y, L.y + L.h - (R.y + R.h)])
+      if (Math.abs(d) <= tol && (by === null || Math.abs(d) < Math.abs(by))) by = d;
   }
-  const from = Math.max(L.x, R.x), to = Math.min(L.x + L.width, R.x + R.w);
-  const y = lay.side === "top" ? L.y : L.y + L.height;
-  return to > from ? { x1: from, y1: y, x2: to, y2: y, len: to - from } : null;
-}
-
-// snap a free-floating remote rect (desktop coords) to the closest local edge
-function snapRemote(c, rx, ry, remoteIdx) {
-  const { w, h } = remoteSize(c, remoteIdx);
-  let best = null;
-  for (const L of snap.local) {
-    const cands = [
-      { side: "left",   dist: Math.abs(rx + w - L.x), along: ry - L.y, len: L.height, rlen: h },
-      { side: "right",  dist: Math.abs(rx - (L.x + L.width)), along: ry - L.y, len: L.height, rlen: h },
-      { side: "top",    dist: Math.abs(ry + h - L.y), along: rx - L.x, len: L.width, rlen: w },
-      { side: "bottom", dist: Math.abs(ry - (L.y + L.height)), along: rx - L.x, len: L.width, rlen: w },
-    ];
-    for (const k of cands) {
-      // must overlap the edge at least a bit
-      const overlap = Math.min(k.len, k.along + k.rlen) - Math.max(0, k.along);
-      if (overlap <= 0) continue;
-      if (!best || k.dist < best.dist) best = { ...k, L };
-    }
-  }
-  if (!best) return null;
-  let offset = Math.round(best.along);
-  const tol = SNAP_PX / view.scale;
-  for (const target of [0, best.len - best.rlen, Math.round((best.len - best.rlen) / 2)]) {
-    if (Math.abs(offset - target) <= tol) { offset = target; break; }
-  }
-  return { local: best.L.name, side: best.side, offset, remote: remoteIdx, linked: true };
+  return { dx: Math.round(lay.dx + (bx ?? 0)), dy: Math.round(lay.dy + (by ?? 0)) };
 }
 
 // ---------- rendering ----------
-function el(tag, attrs, parent) {
-  const e = document.createElementNS(NS, tag);
-  for (const k in attrs) e.setAttribute(k, attrs[k]);
-  if (parent) parent.appendChild(e);
-  return e;
-}
-
-function computeView(rects) {
-  const box = svg.getBoundingClientRect();
-  const W = Math.max(box.width, 300), H = Math.max(box.height, 300);
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const r of rects) { minX = Math.min(minX, r.x); minY = Math.min(minY, r.y); maxX = Math.max(maxX, r.x + r.w); maxY = Math.max(maxY, r.y + r.h); }
-  // room to drag a remote display around
-  const padX = 1400, padY = 900;
-  minX -= padX; maxX += padX; minY -= padY; maxY += padY;
+function el(tag, attrs, parent) { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; }
+function computeView(rs) {
+  const box = svg.getBoundingClientRect(), W = Math.max(box.width, 300), H = Math.max(box.height, 300);
+  const b = bbox(rs), pad = 700;
+  const minX = b.x0 - pad, maxX = b.x1 + pad, minY = b.y0 - pad, maxY = b.y1 + pad;
   const scale = Math.min(W / (maxX - minX), H / (maxY - minY));
   return { scale, ox: (W - (maxX - minX) * scale) / 2 - minX * scale, oy: (H - (maxY - minY) * scale) / 2 - minY * scale, W, H };
 }
-const sx = x => x * view.scale + view.ox;
-const sy = y => y * view.scale + view.oy;
+const sx = x => x * view.scale + view.ox, sy = y => y * view.scale + view.oy;
+
+function drawRect(r, cls, title, sub, parent) {
+  const g = el("g", { class: cls }, parent);
+  const e = el("rect", { x: sx(r.x), y: sy(r.y), width: r.w * view.scale, height: r.h * view.scale, rx: 4 }, g);
+  el("text", { x: sx(r.x) + 8, y: sy(r.y) + 18 }, g).textContent = title;
+  el("text", { x: sx(r.x) + 8, y: sy(r.y) + 34, class: "sub" }, g).textContent = sub;
+  return e;
+}
 
 function render() {
   svg.innerHTML = "";
   if (!snap) return;
   const c = snap.clients.find(c => c.handle === selected);
-  const rects = snap.local.map(d => ({ x: d.x, y: d.y, w: d.width, h: d.height }));
-  if (!drag) view = computeView(rects);
-  const box = svg.getBoundingClientRect();
+  const lay = c ? (drag ? drag.lay : layoutOf(c)) : null;
+  if (!drag) view = computeView([...snap.local.map(rect), ...(c ? placed(c, lay) : [])]);
   svg.setAttribute("viewBox", `0 0 ${view.W} ${view.H}`);
-
-  for (const d of snap.local) {
-    const g = el("g", { class: "local" }, svg);
-    el("rect", { x: sx(d.x), y: sy(d.y), width: d.width * view.scale, height: d.height * view.scale, rx: 4 }, g);
-    const t = el("text", { x: sx(d.x) + 8, y: sy(d.y) + 18 }, g); t.textContent = d.name + (d.primary ? " ★" : "");
-    const s = el("text", { x: sx(d.x) + 8, y: sy(d.y) + 34, class: "sub" }, g); s.textContent = `${d.width}×${d.height} · ${d.scale}x`;
-  }
+  for (const d of snap.local) drawRect(rect(d), "local", d.name + (d.primary ? " ★" : ""), `${d.width}×${d.height} · ${d.scale}x`, svg);
   if (!c) return;
-
-  const lay = currentLayout(c);
-  const R = drag ? drag.rect : placeRemote(c, lay);
-  if (!R) return;
-  const seg = drag ? null : segment(c, lay);
-  if (seg) el("line", { class: "seg", x1: sx(seg.x1), y1: sy(seg.y1), x2: sx(seg.x2), y2: sy(seg.y2) }, svg);
-
-  const g = el("g", { class: "remote" + (drag ? " dragging" : "") + (lay.linked ? "" : " unlinked") }, svg);
-  const rect = el("rect", { x: sx(R.x), y: sy(R.y), width: R.w * view.scale, height: R.h * view.scale, rx: 4 }, g);
-  const t = el("text", { x: sx(R.x) + 8, y: sy(R.y) + 18 }, g); t.textContent = `${clientName(c)} · Monitor ${lay.remote + 1}`;
-  const size = remoteSize(c, lay.remote);
-  const s = el("text", { x: sx(R.x) + 8, y: sy(R.y) + 34, class: "sub" }, g);
-  s.textContent = `${size.w}×${size.h}` + (size.known ? "" : " (estimado: conectá una vez)");
-  rect.addEventListener("pointerdown", ev => startDrag(ev, c, R, lay));
+  for (const k of contacts(c, lay)) {
+    const [x1, y1, x2, y2] = (k.side === "left" || k.side === "right") ? [k.edge, k.from, k.edge, k.to] : [k.from, k.edge, k.to, k.edge];
+    el("line", { class: "seg", x1: sx(x1), y1: sy(y1), x2: sx(x2), y2: sy(y2) }, svg);
+  }
+  const group = el("g", { class: "remote" + (drag ? " dragging" : "") + (lay.saved ? "" : " unlinked") }, svg);
+  for (const r of placed(c, lay)) {
+    const e = drawRect(r, "", `${clientName(c)} · ${r.label}`, `${r.w}×${r.h}` + (r.known ? "" : " (estimado: esperando al peer)"), group);
+    e.addEventListener("pointerdown", ev => startDrag(ev, c, lay));
+  }
 }
 
-function startDrag(ev, c, R, lay) {
-  ev.preventDefault();
-  svg.setPointerCapture(ev.pointerId);
-  drag = { handle: c.handle, start: { x: ev.clientX, y: ev.clientY }, orig: { ...R }, rect: { ...R }, remote: lay.remote };
+function startDrag(ev, c, lay) {
+  ev.preventDefault(); svg.setPointerCapture(ev.pointerId);
+  drag = { handle: c.handle, start: { x: ev.clientX, y: ev.clientY }, orig: { dx: lay.dx, dy: lay.dy }, lay: { dx: lay.dx, dy: lay.dy } };
   render();
 }
 svg.addEventListener("pointermove", ev => {
   if (!drag) return;
-  const dx = (ev.clientX - drag.start.x) / view.scale, dy = (ev.clientY - drag.start.y) / view.scale;
-  drag.rect.x = drag.orig.x + dx; drag.rect.y = drag.orig.y + dy;
+  const c = snap.clients.find(c => c.handle === drag.handle);
+  const free = { dx: drag.orig.dx + (ev.clientX - drag.start.x) / view.scale, dy: drag.orig.dy + (ev.clientY - drag.start.y) / view.scale };
+  drag.lay = snapLayout(c, free);
   render();
 });
 svg.addEventListener("pointerup", async () => {
   if (!drag) return;
-  const c = snap.clients.find(c => c.handle === drag.handle);
-  const lay = snapRemote(c, drag.rect.x, drag.rect.y, drag.remote);
+  const c = snap.clients.find(c => c.handle === drag.handle), lay = drag.lay;
   drag = null;
-  if (!lay) { setMsg("Soltalo pegado a un borde de alguno de tus monitores.", "bad"); render(); return; }
-  draft[c.handle] = lay;
-  render(); renderPanel();
+  if (overlaps(c, lay)) { setMsg("Se superpone con un monitor tuyo: soltalo pegado al borde.", "bad"); render(); return; }
+  draft[c.handle] = lay; render(); renderPanel();
   await save(c);
 });
 
 // ---------- side panel ----------
 function setMsg(text, cls) { message = { text, cls }; const m = document.getElementById("msg"); if (m) { m.textContent = text; m.className = "msg " + cls; } }
+const SIDE = { left: "izquierdo", right: "derecho", top: "superior", bottom: "inferior" };
 
 function renderPanel() {
   if (!snap) return;
-  if (!snap.clients.length) { panel.innerHTML = '<p class="hint">No hay clientes configurados en lan-mouse.</p>'; return; }
+  if (!snap.clients.length) { panel.innerHTML = '<p class="hint">No hay clientes configurados.</p>'; return; }
   if (!snap.clients.some(c => c.handle === selected)) selected = snap.clients[0].handle;
-  const c = snap.clients.find(c => c.handle === selected);
-  const lay = currentLayout(c);
-  const seg = segment(c, lay);
-  const remotes = c.state.remote_displays.length ? c.state.remote_displays : [{ width: 1920, height: 1080 }];
+  const c = snap.clients.find(c => c.handle === selected), lay = layoutOf(c), ks = contacts(c, lay);
   const active = document.activeElement && document.activeElement.id;
-
+  const local = snap.local.map(rect);
+  const onDisplay = k => snap.local.find(d => { const L = rect(d); return (k.side === "left" && L.x === k.edge) || (k.side === "right" && L.x + L.w === k.edge) || (k.side === "top" && L.y === k.edge) || (k.side === "bottom" && L.y + L.h === k.edge); });
   panel.innerHTML = `
     <h2>Cliente</h2>
     <label>Máquina
-      <select id="client">${snap.clients.map(x => `<option value="${x.handle}" ${x.handle === selected ? "selected" : ""}>${clientName(x)} ${x.state.alive ? "· conectada" : "· sin conexión"}</option>`).join("")}</select>
+      <select id="client">${snap.clients.map(x => `<option value="${x.handle}" ${x.handle === selected ? "selected" : ""}>${clientName(x)} · ${x.state.remote_displays.length} monitor(es)${x.state.alive ? " · conectada" : ""}</option>`).join("")}</select>
     </label>
-    <label>Monitor de esta máquina
-      <select id="local">${snap.local.map(d => `<option ${d.name === lay.local ? "selected" : ""}>${d.name}</option>`).join("")}</select>
+    <label>Horizontal (px) — positivo = a la derecha
+      <div class="row"><button data-a="dx" data-d="-10">−10</button><button data-a="dx" data-d="-1">−1</button>
+        <input id="dx" type="number" value="${lay.dx}"><button data-a="dx" data-d="1">+1</button><button data-a="dx" data-d="10">+10</button></div>
     </label>
-    <label>Lado
-      <select id="side">${["left", "right", "top", "bottom"].map(s => `<option value="${s}" ${s === lay.side ? "selected" : ""}>${{ left: "izquierda", right: "derecha", top: "arriba", bottom: "abajo" }[s]}</option>`).join("")}</select>
+    <label>Vertical (px) — positivo = más abajo
+      <div class="row"><button data-a="dy" data-d="-10">−10</button><button data-a="dy" data-d="-1">−1</button>
+        <input id="dy" type="number" value="${lay.dy}"><button data-a="dy" data-d="1">+1</button><button data-a="dy" data-d="10">+10</button></div>
     </label>
-    <label>Monitor remoto
-      <select id="remote">${remotes.map((r, i) => `<option value="${i}" ${i === lay.remote ? "selected" : ""}>Monitor ${i + 1} · ${r.width}×${r.height}</option>`).join("")}</select>
-    </label>
-    <label>Desplazamiento (px) — ${horizontal(lay.side) ? "positivo = más abajo" : "positivo = más a la derecha"}
-      <div class="row">
-        <button data-d="-10">−10</button><button data-d="-1">−1</button>
-        <input id="offset" type="number" value="${lay.offset}">
-        <button data-d="1">+1</button><button data-d="10">+10</button>
-      </div>
-    </label>
-    <p class="hint">${seg ? `El mouse pasa por un tramo de <b>${Math.round(seg.len)} px</b> del borde.` : '<span style="color:var(--bad)">Los monitores no se tocan: no hay por dónde pasar.</span>'}
-      ${lay.linked ? "" : "<br>Todavía no hay link guardado: se usa el borde de todo el escritorio."}</p>
-    <div class="row">
-      <button class="primary" id="save">Guardar</button>
-      <button id="clear" ${c.config.link ? "" : "disabled"}>Quitar link</button>
-    </div>
+    <p class="hint">${ks.length ? "El mouse pasa por:<br>" + ks.map(k => `• borde ${SIDE[k.side]} de <b>${(onDisplay(k) || {}).name || "?"}</b> (${Math.round(k.to - k.from)} px)`).join("<br>")
+        : '<span style="color:var(--bad)">Los monitores no se tocan: no hay por dónde pasar.</span>'}
+      ${overlaps(c, lay) ? '<br><span style="color:var(--bad)">Se superponen: corregilo antes de guardar.</span>' : ""}
+      ${lay.saved ? "" : (lay.suggested ? "<br>Posición sugerida: todavía no hay layout guardado." : "<br>Hay cambios sin guardar.")}</p>
+    <div class="row"><button class="primary" id="save">Guardar</button><button id="clear" ${c.config.layout ? "" : "disabled"}>Quitar layout</button></div>
     <div id="msg" class="msg ${message.cls}">${message.text}</div>
-    <p class="hint">Arrastrá el monitor naranja hasta el borde de uno de los tuyos. Se pega solo y se alinea arriba, abajo o al centro. Después ajustalo fino con los botones.</p>`;
-
-  const upd = patch => { draft[c.handle] = { ...currentLayout(c), ...patch, linked: true }; render(); renderPanel(); };
+    <p class="hint">Arrastrá los monitores naranjas (se mueven juntos) hasta que toquen los tuyos: se pegan solos a los bordes.
+      Lo que guardes acá se aplica también en la otra máquina.</p>`;
+  const upd = patch => { const l = layoutOf(c); draft[c.handle] = { dx: l.dx, dy: l.dy, ...patch }; render(); renderPanel(); };
   panel.querySelector("#client").onchange = e => { selected = Number(e.target.value); render(); renderPanel(); };
-  panel.querySelector("#local").onchange = e => upd({ local: e.target.value });
-  panel.querySelector("#side").onchange = e => upd({ side: e.target.value });
-  panel.querySelector("#remote").onchange = e => upd({ remote: Number(e.target.value) });
-  const off = panel.querySelector("#offset");
-  off.onchange = () => upd({ offset: Math.round(Number(off.value) || 0) });
-  panel.querySelectorAll("button[data-d]").forEach(b => b.onclick = () => upd({ offset: currentLayout(c).offset + Number(b.dataset.d) }));
+  for (const a of ["dx", "dy"]) { const i = panel.querySelector("#" + a); i.onchange = () => upd({ [a]: Math.round(Number(i.value) || 0) }); }
+  panel.querySelectorAll("button[data-d]").forEach(b => b.onclick = () => upd({ [b.dataset.a]: layoutOf(c)[b.dataset.a] + Number(b.dataset.d) }));
   panel.querySelector("#save").onclick = () => save(c);
-  panel.querySelector("#clear").onclick = () => clearLink(c);
-  if (active === "offset") { const o = panel.querySelector("#offset"); o.focus(); o.select(); }
+  panel.querySelector("#clear").onclick = () => clearLayout(c);
+  if (active === "dx" || active === "dy") { const o = panel.querySelector("#" + active); o.focus(); o.select(); }
 }
 
 async function save(c) {
-  const lay = currentLayout(c);
-  if (!segment(c, lay)) { setMsg("No se guardó: los monitores no se tocan.", "bad"); return; }
+  const lay = layoutOf(c);
+  if (overlaps(c, lay)) { setMsg("No se guardó: los monitores se superponen.", "bad"); return; }
+  if (!contacts(c, lay).length) { setMsg("No se guardó: los monitores no se tocan.", "bad"); return; }
   try {
-    await api("/api/link", { method: "POST", body: JSON.stringify({
-      handle: c.handle, position: lay.side,
-      link: { local_display: lay.local, remote_display: lay.remote, offset: lay.offset } }) });
-    delete draft[c.handle];
-    setMsg("Guardado ✓", "ok");
-    await refresh();
+    await api("/api/layout", { method: "POST", body: JSON.stringify({ handle: c.handle, layout: { dx: lay.dx, dy: lay.dy } }) });
+    delete draft[c.handle]; setMsg("Guardado ✓ (también en la otra máquina)", "ok"); await refresh();
   } catch (e) { setMsg("Error: " + e.message, "bad"); }
 }
-
-async function clearLink(c) {
+async function clearLayout(c) {
   try {
-    await api("/api/link", { method: "POST", body: JSON.stringify({ handle: c.handle, position: c.config.pos, link: null }) });
-    delete draft[c.handle];
-    setMsg("Link quitado: vuelve a usarse el borde de todo el escritorio.", "ok");
-    await refresh();
+    await api("/api/layout", { method: "POST", body: JSON.stringify({ handle: c.handle, layout: null }) });
+    delete draft[c.handle]; setMsg("Layout quitado: se usa el borde de todo el escritorio.", "ok"); await refresh();
   } catch (e) { setMsg("Error: " + e.message, "bad"); }
 }
 

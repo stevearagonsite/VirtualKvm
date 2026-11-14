@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::client::ClientManager;
 use crate::connect::LanMouseConnection;
-use crate::displays::LinkGeometry;
+use crate::displays::Layout;
 
 pub(crate) struct Capture {
     cancellation_token: CancellationToken,
@@ -70,8 +70,10 @@ enum CaptureRequest {
     Reenable,
     /// set release bind
     SetReleaseBind(Vec<scancode::Linux>),
-    /// (VirtualKvm) the display link of a client changed
-    UpdateLink(CaptureHandle),
+    /// (VirtualKvm) the display layout of a client changed
+    UpdateLayout(CaptureHandle),
+    /// (VirtualKvm) send our layout for this client to the peer (mirrored there)
+    SyncLayout(CaptureHandle),
 }
 
 impl Capture {
@@ -149,9 +151,14 @@ impl Capture {
         self.event_rx.recv().await.expect("channel closed")
     }
 
-    /// (VirtualKvm) re-apply the display link of a client
-    pub(crate) fn update_link(&self, handle: CaptureHandle) {
-        let _ = self.request_tx.send(CaptureRequest::UpdateLink(handle));
+    /// (VirtualKvm) re-apply the display layout of a client
+    pub(crate) fn update_layout(&self, handle: CaptureHandle) {
+        let _ = self.request_tx.send(CaptureRequest::UpdateLayout(handle));
+    }
+
+    /// (VirtualKvm) tell the peer about our layout so it stores the mirrored one
+    pub(crate) fn sync_layout(&self, handle: CaptureHandle) {
+        let _ = self.request_tx.send(CaptureRequest::SyncLayout(handle));
     }
 
     pub(crate) fn set_release_bind(&mut self, bind: Vec<scancode::Linux>) {
@@ -186,7 +193,7 @@ struct CaptureTask {
     /// (VirtualKvm) `Enter`/`EnterAt` to (re)send until the peer acknowledges
     pending_enter: Option<ProtoEvent>,
     /// (VirtualKvm) local point where the barrier was crossed
-    crossing: Option<(f64, f64)>,
+    crossing: Option<(f64, f64, Position)>,
     conn: LanMouseConnection,
     event_tx: Sender<ICaptureEvent>,
     release_bind: Rc<RefCell<Vec<scancode::Linux>>>,
@@ -217,27 +224,19 @@ impl CaptureTask {
             .1
     }
 
-    /// (VirtualKvm) resolved link geometry of an outgoing client, if it has a link
-    fn link_geometry(&self, handle: CaptureHandle) -> Option<LinkGeometry> {
-        let link = self.client_manager.get_link(handle)?;
-        let pos = self.client_manager.get_pos(handle)?;
-        let geometry = LinkGeometry::resolve(
-            &link,
-            pos,
+    /// (VirtualKvm) resolved display layout of a client, if it has one
+    fn layout(&self, handle: CaptureHandle) -> Option<Layout> {
+        let layout = self.client_manager.get_layout(handle)?;
+        Some(Layout::new(
+            layout,
             &vkvm_displays::list(),
             &self.client_manager.remote_displays(handle),
-        );
-        if geometry.is_none() {
-            log::warn!(
-                "client {handle}: local display `{}` not found",
-                link.local_display
-            );
-        }
-        geometry
+        ))
     }
 
-    /// (VirtualKvm) barrier segment for a client (None = whole desktop edge)
-    fn segment(&self, handle: CaptureHandle) -> Option<Segment> {
+    /// (VirtualKvm) barrier segments for a client (None = whole desktop edge).
+    /// Without the peer's displays we can't know where they touch ours yet.
+    fn segments(&self, handle: CaptureHandle) -> Option<Vec<Segment>> {
         if !self
             .captures
             .iter()
@@ -245,26 +244,65 @@ impl CaptureTask {
         {
             return None;
         }
-        let g = self.link_geometry(handle)?;
-        let (from, to) = g.segment();
-        Some(Segment {
-            x: g.local.x,
-            y: g.local.y,
-            width: g.local.w,
-            height: g.local.h,
-            from,
-            to,
-        })
+        let layout = self.layout(handle)?;
+        if layout.remote.is_empty() {
+            return None;
+        }
+        Some(
+            layout
+                .contacts()
+                .into_iter()
+                .map(|c| Segment {
+                    side: to_capture_pos(c.side),
+                    x: c.display.x,
+                    y: c.display.y,
+                    width: c.display.w,
+                    height: c.display.h,
+                    from: c.from,
+                    to: c.to,
+                })
+                .collect(),
+        )
     }
 
-    async fn apply_segment(
+    async fn apply_segments(
         &mut self,
         capture: &mut InputCapture,
         handle: CaptureHandle,
     ) -> Result<(), CaptureError> {
-        let segment = self.segment(handle);
-        log::info!("client {handle}: barrier segment {segment:?}");
-        capture.set_segment(handle, segment).await
+        let segments = self.segments(handle);
+        log::info!("client {handle}: barrier segments {segments:?}");
+        capture.set_segments(handle, segments).await
+    }
+
+    /// (VirtualKvm) send our layout to the peer (it stores the mirrored one)
+    async fn send_layout(&self, handle: CaptureHandle) {
+        let event = match self.client_manager.get_layout(handle) {
+            Some(l) => ProtoEvent::LayoutSync {
+                present: true,
+                dx: l.dx,
+                dy: l.dy,
+            },
+            None => ProtoEvent::LayoutSync {
+                present: false,
+                dx: 0,
+                dy: 0,
+            },
+        };
+        log::info!("client {handle}: sending {event}");
+        if let Err(e) = self.conn.send(event, handle).await {
+            log::warn!("client {handle}: could not send layout: {e}");
+        }
+    }
+
+    /// (VirtualKvm) connect to active clients whose displays we don't know yet,
+    /// so the layout works (and the UI shows them) before the first crossing
+    async fn probe_peers(&self) {
+        for (handle, _, state) in self.client_manager.get_client_states() {
+            if state.active && state.remote_displays.is_empty() {
+                let _ = self.conn.send(ProtoEvent::Ping, handle).await;
+            }
+        }
     }
 
     fn get_type(&self, handle: CaptureHandle) -> CaptureType {
@@ -276,6 +314,7 @@ impl CaptureTask {
     }
 
     async fn run(mut self) {
+        let mut probe = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             if let Err(e) = self.do_capture().await {
                 log::warn!("input capture exited: {e}");
@@ -290,8 +329,10 @@ impl CaptureTask {
                         CaptureRequest::SetReleaseBind(bind) => {
                             self.release_bind.borrow_mut().clone_from(&bind);
                         }
-                        CaptureRequest::UpdateLink(_) => { /* applied when capture starts */ }
+                        CaptureRequest::UpdateLayout(_) => { /* applied when capture starts */ }
+                        CaptureRequest::SyncLayout(h) => self.send_layout(h).await,
                     },
+                    _ = probe.tick() => self.probe_peers().await,
                     _ = self.cancellation_token.cancelled() => return,
                 }
             }
@@ -333,7 +374,7 @@ impl CaptureTask {
                 r = capture.create(handle, pos) => r?,
                 _ = self.cancellation_token.cancelled() => return Ok(()),
             }
-            self.apply_segment(capture, handle).await?;
+            self.apply_segments(capture, handle).await?;
         }
         Ok(())
     }
@@ -342,18 +383,20 @@ impl CaptureTask {
         &mut self,
         capture: &mut InputCapture,
     ) -> Result<(), InputCaptureError> {
+        let mut probe = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tokio::select! {
+                _ = probe.tick() => self.probe_peers().await,
                 event = capture.next() => match event {
                     Some(event) => self.handle_capture_event(capture, event?).await?,
                     None => return Ok(()),
                 },
                 (handle, event) = self.conn.recv() => {
                     // (VirtualKvm) the peer finished announcing its displays:
-                    // the barrier segment may change
+                    // the barrier segments may change
                     if let ProtoEvent::DisplayInfo { index, count, .. } = event {
                         if index + 1 == count {
-                            self.apply_segment(capture, handle).await?;
+                            self.apply_segments(capture, handle).await?;
                         }
                         continue;
                     }
@@ -378,7 +421,7 @@ impl CaptureTask {
                         },
                         // (VirtualKvm) place our cursor where it left the peer
                         ProtoEvent::LeaveAt { x, y } => {
-                            let point = self.link_geometry(handle).map(|g| g.to_local(x, y));
+                            let point = self.layout(handle).and_then(|g| g.to_local(x, y));
                             log::info!("releasing capture: left remote client device at ({x:.0}, {y:.0}) -> {point:?}");
                             self.release_capture_at(capture, point).await?;
                         },
@@ -391,9 +434,10 @@ impl CaptureTask {
                     CaptureRequest::Create(h, p, t) => {
                         self.add_capture(h, p, t);
                         capture.create(h, p).await?;
-                        self.apply_segment(capture, h).await?;
+                        self.apply_segments(capture, h).await?;
                     }
-                    CaptureRequest::UpdateLink(h) => self.apply_segment(capture, h).await?,
+                    CaptureRequest::UpdateLayout(h) => self.apply_segments(capture, h).await?,
+                    CaptureRequest::SyncLayout(h) => self.send_layout(h).await,
                     CaptureRequest::Destroy(h) => {
                         // If the capture we're tearing down is the
                         // currently-active one, treat this as a
@@ -466,18 +510,17 @@ impl CaptureTask {
         // so keep retrying while the `Enter` is not acknowledged yet.
         if begin {
             self.crossing = match event {
-                CaptureEvent::BeginAt { x, y } => Some((x, y)),
+                CaptureEvent::BeginAt { x, y, side } => Some((x, y, side)),
                 _ => None,
             };
             self.pending_enter = None;
-            self.crossing = None;
         }
         if self.state == State::WaitingForAck
             && !matches!(self.pending_enter, Some(ProtoEvent::EnterAt { .. }))
         {
             let entry = self
                 .crossing
-                .and_then(|(x, y)| self.link_geometry(handle)?.to_remote(x, y))
+                .and_then(|(x, y, side)| self.layout(handle)?.to_remote(to_ipc_pos(side), x, y))
                 .map(|(x, y)| ProtoEvent::EnterAt {
                     pos: opposite_pos,
                     x,
@@ -524,6 +567,7 @@ impl CaptureTask {
         point: Option<(f64, f64)>,
     ) -> Result<(), CaptureError> {
         self.pending_enter = None;
+        self.crossing = None;
         // If we have an active client, notify them we're leaving
         if let Some(handle) = self.active_client.take() {
             // Surface the leave to the service layer so it can fire
@@ -597,6 +641,15 @@ fn to_capture_pos(pos: lan_mouse_ipc::Position) -> input_capture::Position {
         lan_mouse_ipc::Position::Right => input_capture::Position::Right,
         lan_mouse_ipc::Position::Top => input_capture::Position::Top,
         lan_mouse_ipc::Position::Bottom => input_capture::Position::Bottom,
+    }
+}
+
+fn to_ipc_pos(pos: input_capture::Position) -> lan_mouse_ipc::Position {
+    match pos {
+        input_capture::Position::Left => lan_mouse_ipc::Position::Left,
+        input_capture::Position::Right => lan_mouse_ipc::Position::Right,
+        input_capture::Position::Top => lan_mouse_ipc::Position::Top,
+        input_capture::Position::Bottom => lan_mouse_ipc::Position::Bottom,
     }
 }
 

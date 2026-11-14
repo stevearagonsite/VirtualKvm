@@ -34,7 +34,7 @@ impl ClientManager {
             pos: config_client.pos,
             cmd: config_client.enter_hook,
             leave_cmd: config_client.leave_hook,
-            link: config_client.link,
+            layout: config_client.layout,
         };
         let state = ClientState {
             active: config_client.active,
@@ -93,6 +93,14 @@ impl ClientManager {
     }
 
     /// find a client by its address
+    /// (VirtualKvm) client configured with this peer ip, active or not
+    pub(crate) fn get_client_by_ip(&self, ip: std::net::IpAddr) -> Option<ClientHandle> {
+        self.clients
+            .borrow()
+            .iter()
+            .find_map(|(k, (_, s))| s.ips.contains(&ip).then_some(k as ClientHandle))
+    }
+
     pub fn get_client(&self, addr: SocketAddr) -> Option<ClientHandle> {
         // since there shouldn't be more than a handful of clients at any given
         // time this is likely faster than using a HashMap
@@ -326,17 +334,28 @@ impl ClientManager {
             .unwrap_or_default()
     }
 
-    pub(crate) fn get_link(&self, handle: ClientHandle) -> Option<lan_mouse_ipc::DisplayLink> {
+    pub(crate) fn get_layout(&self, handle: ClientHandle) -> Option<lan_mouse_ipc::DisplayLayout> {
         self.clients
             .borrow()
             .get(handle as usize)
-            .and_then(|(c, _)| c.link.clone())
+            .and_then(|(c, _)| c.layout)
     }
 
-    pub(crate) fn set_link(&self, handle: ClientHandle, link: Option<lan_mouse_ipc::DisplayLink>) {
+    pub(crate) fn set_layout(
+        &self,
+        handle: ClientHandle,
+        layout: Option<lan_mouse_ipc::DisplayLayout>,
+    ) {
         if let Some((c, _)) = self.clients.borrow_mut().get_mut(handle as usize) {
-            c.link = link;
+            c.layout = layout;
         }
+    }
+
+    pub(crate) fn is_active(&self, handle: ClientHandle) -> bool {
+        self.clients
+            .borrow()
+            .get(handle as usize)
+            .is_some_and(|(_, s)| s.active)
     }
 
     pub(crate) fn set_peer_commit(&self, handle: ClientHandle, commit: Option<[u8; 8]>) {

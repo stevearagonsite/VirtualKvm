@@ -94,6 +94,10 @@ pub enum ProtoEvent {
     /// sender's own coordinates) where the cursor left, so the other side
     /// can place its cursor at the matching spot.
     LeaveAt { x: f64, y: f64 },
+    /// (VirtualKvm) the sender placed the receiver's displays at
+    /// `sender = receiver + (dx, dy)`; the receiver stores the mirrored layout.
+    /// `present == false` removes the layout.
+    LayoutSync { present: bool, dx: i32, dy: i32 },
 }
 
 impl Display for ProtoEvent {
@@ -128,6 +132,9 @@ impl Display for ProtoEvent {
                 "DisplayInfo({index}/{count}: {width}x{height}@({x},{y}) {scale_pct}%)"
             ),
             ProtoEvent::EnterAt { pos, x, y } => write!(f, "EnterAt({pos}, {x:.0}, {y:.0})"),
+            ProtoEvent::LayoutSync { present, dx, dy } => {
+                write!(f, "LayoutSync({present}, {dx}, {dy})")
+            }
             ProtoEvent::LeaveAt { x, y } => {
                 write!(f, "LeaveAt({x:.0}, {y:.0})")
             }
@@ -153,6 +160,7 @@ pub enum EventType {
     DisplayInfo,
     EnterAt,
     LeaveAt,
+    LayoutSync,
 }
 
 impl ProtoEvent {
@@ -179,6 +187,7 @@ impl ProtoEvent {
             ProtoEvent::DisplayInfo { .. } => EventType::DisplayInfo,
             ProtoEvent::EnterAt { .. } => EventType::EnterAt,
             ProtoEvent::LeaveAt { .. } => EventType::LeaveAt,
+            ProtoEvent::LayoutSync { .. } => EventType::LayoutSync,
         }
     }
 }
@@ -257,6 +266,11 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
             EventType::LeaveAt => Ok(Self::LeaveAt {
                 x: decode_f64(&mut buf)?,
                 y: decode_f64(&mut buf)?,
+            }),
+            EventType::LayoutSync => Ok(Self::LayoutSync {
+                present: decode_u8(&mut buf)? != 0,
+                dx: decode_i32(&mut buf)?,
+                dy: decode_i32(&mut buf)?,
             }),
         }
     }
@@ -353,6 +367,11 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                     encode_f64(buf, len, x);
                     encode_f64(buf, len, y);
                 }
+                ProtoEvent::LayoutSync { present, dx, dy } => {
+                    encode_u8(buf, len, present as u8);
+                    encode_i32(buf, len, dx);
+                    encode_i32(buf, len, dy);
+                }
             }
         }
         (buf, len)
@@ -443,6 +462,22 @@ mod vkvm_tests {
                 x,
                 y,
             } => assert_eq!((x, y), (1918.0, 540.5)),
+            e => panic!("unexpected {e}"),
+        }
+    }
+
+    #[test]
+    fn layout_sync_roundtrip() {
+        match roundtrip(ProtoEvent::LayoutSync {
+            present: true,
+            dx: -993,
+            dy: -1080,
+        }) {
+            ProtoEvent::LayoutSync {
+                present: true,
+                dx: -993,
+                dy: -1080,
+            } => {}
             e => panic!("unexpected {e}"),
         }
     }

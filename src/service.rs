@@ -197,11 +197,21 @@ impl Service {
             FrontendRequest::GetDisplays => {
                 self.notify_frontend(FrontendEvent::Displays(vkvm_displays::list()))
             }
-            FrontendRequest::UpdateLink(handle, link) => {
-                log::info!("client ({handle}) link: {link:?}");
-                self.client_manager.set_link(handle, link);
-                self.capture.update_link(handle);
-                self.broadcast_client(handle);
+            FrontendRequest::UpdateLayout(handle, layout) => {
+                log::info!("client ({handle}) layout: {layout:?}");
+                if let Some(l) = layout {
+                    let remote = self.client_manager.remote_displays(handle);
+                    let g = crate::displays::Layout::new(l, &vkvm_displays::list(), &remote);
+                    if g.overlaps() {
+                        self.notify_frontend(FrontendEvent::Error(
+                            "los monitores se superponen".into(),
+                        ));
+                        return;
+                    }
+                }
+                self.apply_layout(handle, layout);
+                // the peer stores the mirrored layout
+                self.capture.sync_layout(handle);
                 self.save_config();
             }
             FrontendRequest::UpdateFixIps(handle, fix_ips) => {
@@ -248,7 +258,7 @@ impl Service {
                 active: s.active,
                 enter_hook: c.cmd,
                 leave_hook: c.leave_cmd,
-                link: c.link,
+                layout: c.layout,
             })
             .collect();
         self.config.set_clients(clients);
@@ -343,10 +353,29 @@ impl Service {
                 display,
             } => {
                 log::info!("{addr} display {index}/{count}: {display:?}");
-                if let Some(handle) = self.client_manager.get_client(addr) {
+                // also for inactive clients: the layout UI needs the peer's displays
+                if let Some(handle) = self.client_manager.get_client_by_ip(addr.ip()) {
                     self.client_manager
                         .set_remote_display(handle, index, count, display);
-                    self.broadcast_client(handle);
+                    if index + 1 == count {
+                        // the primary side may change now that the displays are known
+                        let layout = self.client_manager.get_layout(handle);
+                        self.apply_layout(handle, layout);
+                    } else {
+                        self.broadcast_client(handle);
+                    }
+                }
+            }
+            EmulationEvent::PeerLayout { addr, layout } => {
+                let Some(handle) = self.client_manager.get_client_by_ip(addr.ip()) else {
+                    log::warn!("{addr} sent a layout, but it is not a configured client");
+                    return;
+                };
+                let layout = layout.map(|l| l.mirrored());
+                log::info!("client ({handle}) layout from peer: {layout:?}");
+                if self.client_manager.get_layout(handle) != layout {
+                    self.apply_layout(handle, layout);
+                    self.save_config();
                 }
             }
             EmulationEvent::PeerHello { addr, commit } => {
@@ -521,6 +550,31 @@ impl Service {
         } else {
             self.deactivate_client(handle);
         }
+    }
+
+    /// (VirtualKvm) store a display layout and re-apply it. The client position
+    /// follows the longest touching edge; an inactive client stays inactive.
+    fn apply_layout(&mut self, handle: ClientHandle, layout: Option<lan_mouse_ipc::DisplayLayout>) {
+        self.client_manager.set_layout(handle, layout);
+        if let Some(l) = layout {
+            let remote = self.client_manager.remote_displays(handle);
+            let side =
+                crate::displays::Layout::new(l, &vkvm_displays::list(), &remote).primary_side();
+            if let Some(side) = side {
+                let active = self.client_manager.is_active(handle);
+                if self.client_manager.get_pos(handle) != Some(side) {
+                    if active {
+                        self.deactivate_client(handle);
+                    }
+                    self.client_manager.set_pos(handle, side);
+                    if active {
+                        self.activate_client(handle);
+                    }
+                }
+            }
+        }
+        self.capture.update_layout(handle);
+        self.broadcast_client(handle);
     }
 
     fn deactivate_client(&mut self, handle: ClientHandle) {

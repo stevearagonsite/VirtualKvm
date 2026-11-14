@@ -26,6 +26,12 @@ pub struct TrayArgs {
     /// file for the daemon's log output (default: next to the lan-mouse config)
     #[arg(long)]
     log: Option<PathBuf>,
+    /// lan-mouse executable to run as daemon / web UI (default: this executable).
+    /// On macOS a separate, stable tray executable keeps the Accessibility
+    /// permission while the daemon binary gets updated: TCC attributes the
+    /// child to the tray, its responsible process.
+    #[arg(long)]
+    daemon_exe: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -91,7 +97,7 @@ mod imp {
         let base = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("."));
-        base.join("lan-mouse")
+        base.join("virtualkvm")
     }
 
     /// remembered on/off switch
@@ -109,8 +115,13 @@ mod imp {
         }
     }
 
+    static DAEMON_EXE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
     fn command(args: &[&str]) -> Command {
-        let exe = std::env::current_exe().expect("current exe");
+        let exe = DAEMON_EXE
+            .get()
+            .cloned()
+            .unwrap_or_else(|| std::env::current_exe().expect("current exe"));
         let mut cmd = Command::new(exe);
         cmd.args(args);
         #[cfg(windows)]
@@ -270,7 +281,7 @@ mod imp {
         fn show(&mut self, running: bool, wanted: bool, external: bool) {
             let key = Some(running);
             let label = if external {
-                "Lan Mouse ya corre fuera de la bandeja"
+                "VirtualKvm ya corre fuera de la bandeja"
             } else if running {
                 "Compartiendo mouse y teclado"
             } else if wanted {
@@ -294,6 +305,9 @@ mod imp {
     }
 
     pub fn run(args: TrayArgs) -> Result<(), TrayError> {
+        if let Some(exe) = args.daemon_exe.clone() {
+            let _ = DAEMON_EXE.set(exe);
+        }
         let switch = Switch(config_dir().join("vkvm-tray-state"));
         let mut daemon = Daemon {
             child: None,

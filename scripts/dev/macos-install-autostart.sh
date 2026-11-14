@@ -14,9 +14,11 @@
 # los permisos de Accesibilidad y Monitoreo de entrada.
 set -euo pipefail
 
-LABEL="com.virtualkvm.lan-mouse"
+LABEL="com.virtualkvm.tray"
+LEGACY_LABEL="com.virtualkvm.lan-mouse"
 DEST="$HOME/.local/share/virtualkvm"
-BIN="$DEST/lan-mouse"
+BIN="$DEST/vkvm"               # daemon: se actualiza en cada instalación
+TRAY="$DEST/VirtualKvm"        # bandeja: copia fija, es la que lleva el permiso de macOS
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOGDIR="$HOME/Library/Logs/VirtualKvm"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -29,15 +31,19 @@ if [[ "${1:-}" == "--uninstall" ]]; then
   exit 0
 fi
 
-SRC="$REPO/target/release/lan-mouse"
+SRC="$REPO/target/release/vkvm"
 [[ -x "$SRC" ]] || { echo "no existe $SRC: compilá antes con cargo build --release --no-default-features" >&2; exit 1; }
 
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+# antes del rebranding: LaunchAgent y daemon se llamaban lan-mouse
+launchctl bootout "$DOMAIN/$LEGACY_LABEL" 2>/dev/null || true
+rm -f "$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist" "$DEST/lan-mouse"
 mkdir -p "$DEST" "$LOGDIR" "$(dirname "$PLIST")"
-# solo copiar si cambió, para no invalidar el permiso de macOS sin necesidad
-if ! cmp -s "$SRC" "$BIN"; then
-  cp "$SRC" "$BIN"
-  echo "binario actualizado: puede que macOS vuelva a pedir Accesibilidad / Monitoreo de entrada"
+cp "$SRC" "$BIN"
+# la bandeja solo se reemplaza si no existe o con --update-tray (eso invalida el permiso)
+if [[ ! -x "$TRAY" || "${1:-}" == "--update-tray" ]]; then
+  cp "$SRC" "$TRAY"
+  echo "bandeja instalada: dar permiso de Accesibilidad y Monitoreo de entrada a $TRAY"
 fi
 
 cat > "$PLIST" <<EOF
@@ -48,8 +54,10 @@ cat > "$PLIST" <<EOF
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$BIN</string>
+    <string>$TRAY</string>
     <string>tray</string>
+    <string>--daemon-exe</string>
+    <string>$BIN</string>
     <string>--log</string>
     <string>$LOGDIR/daemon.log</string>
   </array>
@@ -71,5 +79,5 @@ launchctl print "$DOMAIN/$LABEL" | grep -E "^\s+(state|pid) =" | head -2
 if tail -20 "$LOGDIR/daemon.log" | grep -q "accessibility permission is required"; then
   echo
   echo "FALTA PERMISO: Ajustes > Privacidad y seguridad > Accesibilidad y Monitoreo de entrada"
-  echo "agregar: $BIN   y después volver a correr este script"
+  echo "agregar: $TRAY   y después volver a correr este script"
 fi

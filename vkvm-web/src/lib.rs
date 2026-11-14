@@ -20,8 +20,8 @@ use axum::{
 };
 use futures::StreamExt;
 use lan_mouse_ipc::{
-    ClientConfig, ClientHandle, ClientState, ConnectionError, DisplayInfo, DisplayLink,
-    FrontendEvent, FrontendRequest, IpcError, Position, connect_async,
+    ClientConfig, ClientHandle, ClientState, ConnectionError, DisplayInfo, DisplayLayout,
+    FrontendEvent, FrontendRequest, IpcError, connect_async,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -202,7 +202,7 @@ pub async fn run(args: WebArgs) -> Result<(), WebError> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/state", get(get_state))
-        .route("/api/link", post(set_link))
+        .route("/api/layout", post(set_layout))
         .with_state(state);
 
     let listener = TcpListener::bind(("127.0.0.1", args.port)).await?;
@@ -238,36 +238,30 @@ async fn get_state(State(app): State<AppState>, headers: HeaderMap) -> Response 
 }
 
 #[derive(Debug, Deserialize)]
-struct LinkRequest {
+struct LayoutRequest {
     handle: ClientHandle,
-    position: Position,
-    link: Option<DisplayLink>,
+    layout: Option<DisplayLayout>,
 }
 
-async fn set_link(
+async fn set_layout(
     State(app): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<LinkRequest>,
+    Json(req): Json<LayoutRequest>,
 ) -> Response {
     if let Err(code) = app.check(&headers) {
         return code.into_response();
     }
-    let current = app
+    let known = app
         .snapshot
         .lock()
         .expect("lock")
         .clients
         .iter()
-        .find(|c| c.handle == req.handle)
-        .map(|c| c.config.pos);
-    match current {
-        None => return StatusCode::NOT_FOUND.into_response(),
-        Some(pos) if pos != req.position => {
-            app.request(FrontendRequest::UpdatePosition(req.handle, req.position))
-        }
-        Some(_) => {}
+        .any(|c| c.handle == req.handle);
+    if !known {
+        return StatusCode::NOT_FOUND.into_response();
     }
-    app.request(FrontendRequest::UpdateLink(req.handle, req.link));
+    app.request(FrontendRequest::UpdateLayout(req.handle, req.layout));
     app.request(FrontendRequest::Enumerate());
     StatusCode::NO_CONTENT.into_response()
 }

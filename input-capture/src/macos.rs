@@ -60,8 +60,10 @@ struct InputCaptureState {
     bounds: Bounds,
     /// current state of modifier keys
     modifier_state: XMods,
-    /// (VirtualKvm) barriers restricted to a display segment
-    segments: HashMap<Position, Segment>,
+    /// (VirtualKvm) barriers restricted to display segments
+    segments: HashMap<Position, Vec<Segment>>,
+    /// (VirtualKvm) display edge crossed by the current capture
+    crossed_side: Option<Position>,
 }
 
 #[derive(Debug)]
@@ -71,7 +73,7 @@ enum ProducerEvent {
     Destroy(Position),
     Grab(Position),
     /// (VirtualKvm) restrict a barrier to a display segment
-    SetSegment(Position, Option<Segment>),
+    SetSegments(Position, Option<Vec<Segment>>),
     /// (VirtualKvm) release with the cursor placed at the given point
     ReleaseAt(f64, f64),
     EventTapDisabled,
@@ -87,6 +89,7 @@ impl InputCaptureState {
             bounds: Bounds::default(),
             modifier_state: Default::default(),
             segments: HashMap::new(),
+            crossed_side: None,
         };
         res.update_bounds()?;
         Ok(res)
@@ -98,13 +101,21 @@ impl InputCaptureState {
         let relative_y = event.get_double_value_field(EventField::MOUSE_EVENT_DELTA_Y);
 
         for &position in self.active_clients.iter() {
-            if let Some(segment) = self.segments.get(&position) {
-                if segment.crossed(position, location.x, location.y, relative_x, relative_y) {
-                    log::debug!("Crossed segment barrier into position: {position:?}");
+            if let Some(segments) = self.segments.get(&position) {
+                if let Some(s) = segments
+                    .iter()
+                    .find(|s| s.crossed(location.x, location.y, relative_x, relative_y))
+                {
+                    log::debug!(
+                        "Crossed {} segment barrier into position: {position:?}",
+                        s.side
+                    );
+                    self.crossed_side = Some(s.side);
                     return Some(position);
                 }
                 continue;
             }
+            self.crossed_side = Some(position);
             if (position == Position::Left && (location.x + relative_x) <= self.bounds.xmin)
                 || (position == Position::Right && (location.x + relative_x) >= self.bounds.xmax)
                 || (position == Position::Top && (location.y + relative_y) <= self.bounds.ymin)
@@ -137,9 +148,16 @@ impl InputCaptureState {
     fn start_capture(&mut self, event: &CGEvent, position: Position) -> Result<(), CaptureError> {
         let mut location = event.location();
         let edge_offset = 1.0;
-        if let Some(s) = self.segments.get(&position) {
-            // (VirtualKvm) keep the hidden cursor at the edge of the linked display
-            match position {
+        let side = self.crossed_side.unwrap_or(position);
+        let segment = self.segments.get(&position).and_then(|segments| {
+            segments
+                .iter()
+                .find(|s| s.side == side && s.contains_point(location.x, location.y))
+                .copied()
+        });
+        if let Some(s) = segment {
+            // (VirtualKvm) keep the hidden cursor at the edge of the crossed display
+            match side {
                 Position::Left => location.x = s.x + edge_offset,
                 Position::Right => location.x = s.x + s.width - edge_offset,
                 Position::Top => location.y = s.y + edge_offset,
@@ -195,7 +213,7 @@ impl InputCaptureState {
             ProducerEvent::Create(p) => {
                 self.active_clients.insert(p);
             }
-            ProducerEvent::SetSegment(p, segment) => match segment {
+            ProducerEvent::SetSegments(p, segments) => match segments {
                 Some(s) => {
                     self.segments.insert(p, s);
                 }
@@ -574,12 +592,14 @@ fn create_event_tap<'a>(
             if let Some(new_pos) = state.crossed(cg_ev) {
                 capture_position = Some(new_pos);
                 let crossing = cg_ev.location();
+                let side = state.crossed_side.unwrap_or(new_pos);
                 state
                     .start_capture(cg_ev, new_pos)
                     .unwrap_or_else(|e| log::warn!("{e}"));
                 res_events.push(CaptureEvent::BeginAt {
                     x: crossing.x,
                     y: crossing.y,
+                    side,
                 });
                 notify_tx
                     .blocking_send(ProducerEvent::Grab(new_pos))
@@ -843,12 +863,12 @@ impl Capture for MacOSInputCapture {
         Ok(())
     }
 
-    fn set_segment(&mut self, pos: Position, segment: Option<Segment>) {
+    fn set_segments(&mut self, pos: Position, segments: Option<Vec<Segment>>) {
         let notify_tx = self.notify_tx.clone();
         tokio::task::spawn_local(async move {
-            log::debug!("set segment {pos}: {segment:?}");
+            log::debug!("set segments {pos}: {segments:?}");
             let _ = notify_tx
-                .send(ProducerEvent::SetSegment(pos, segment))
+                .send(ProducerEvent::SetSegments(pos, segments))
                 .await;
         });
     }

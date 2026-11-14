@@ -17,7 +17,7 @@ use toml;
 use toml_edit::{self, DocumentMut};
 
 use lan_mouse_cli::CliArgs;
-use lan_mouse_ipc::{DEFAULT_PORT, DisplayLink, Position};
+use lan_mouse_ipc::{DEFAULT_PORT, DisplayLayout, Position};
 
 use input_event::scancode::{
     self,
@@ -41,23 +41,60 @@ pub fn local_commit() -> [u8; 8] {
 }
 
 const CONFIG_FILE_NAME: &str = "config.toml";
-const CERT_FILE_NAME: &str = "lan-mouse.pem";
+const CERT_FILE_NAME: &str = "vkvm.pem";
+/// (VirtualKvm) certificate file name used by upstream lan-mouse
+const LEGACY_CERT_FILE_NAME: &str = "lan-mouse.pem";
 
 fn default_path() -> Result<PathBuf, VarError> {
     #[cfg(unix)]
     let default_path = {
         let xdg_config_home =
             env::var("XDG_CONFIG_HOME").unwrap_or(format!("{}/.config", env::var("HOME")?));
-        format!("{xdg_config_home}/lan-mouse/")
+        format!("{xdg_config_home}/virtualkvm/")
     };
 
     #[cfg(not(unix))]
     let default_path = {
         let app_data =
             env::var("LOCALAPPDATA").unwrap_or(format!("{}/.config", env::var("USERPROFILE")?));
-        format!("{app_data}\\lan-mouse\\")
+        format!("{app_data}\\virtualkvm\\")
     };
-    Ok(PathBuf::from(default_path))
+    let path = PathBuf::from(default_path);
+    migrate_legacy_config(&path);
+    Ok(path)
+}
+
+/// (VirtualKvm) first start after the rebranding: take over the config and the
+/// certificate of the old `lan-mouse` directory, so peers that authorized our
+/// fingerprint keep accepting us.
+fn migrate_legacy_config(new_dir: &Path) {
+    if new_dir.exists() {
+        return;
+    }
+    let Some(parent) = new_dir.parent() else {
+        return;
+    };
+    let old_dir = parent.join("lan-mouse");
+    if !old_dir.is_dir() {
+        return;
+    }
+    if let Err(e) = fs::create_dir_all(new_dir) {
+        log::warn!("could not create {new_dir:?}: {e}");
+        return;
+    }
+    for (from, to) in [
+        (CONFIG_FILE_NAME, CONFIG_FILE_NAME),
+        (LEGACY_CERT_FILE_NAME, CERT_FILE_NAME),
+        ("vkvm-tray-state", "vkvm-tray-state"),
+    ] {
+        let (from, to) = (old_dir.join(from), new_dir.join(to));
+        if from.exists() {
+            match fs::copy(&from, &to) {
+                Ok(_) => log::info!("migrated {from:?} -> {to:?}"),
+                Err(e) => log::warn!("could not migrate {from:?}: {e}"),
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -81,7 +118,7 @@ struct TomlClient {
     activate_on_startup: Option<bool>,
     enter_hook: Option<String>,
     leave_hook: Option<String>,
-    link: Option<DisplayLink>,
+    layout: Option<DisplayLayout>,
 }
 
 impl ConfigToml {
@@ -92,7 +129,7 @@ impl ConfigToml {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version=build::CLAP_LONG_VERSION, about, long_about = None)]
+#[command(name = "vkvm", author, version=build::CLAP_LONG_VERSION, about, long_about = None)]
 struct Args {
     /// the listen port for lan-mouse
     #[arg(short, long)]
@@ -282,7 +319,7 @@ pub struct ConfigClient {
     pub active: bool,
     pub enter_hook: Option<String>,
     pub leave_hook: Option<String>,
-    pub link: Option<DisplayLink>,
+    pub layout: Option<DisplayLayout>,
 }
 
 impl From<TomlClient> for ConfigClient {
@@ -294,7 +331,7 @@ impl From<TomlClient> for ConfigClient {
         let ips = HashSet::from_iter(toml.ips.into_iter().flatten());
         let port = toml.port.unwrap_or(DEFAULT_PORT);
         let pos = toml.position.unwrap_or_default();
-        let link = toml.link;
+        let layout = toml.layout;
         Self {
             ips,
             hostname,
@@ -303,7 +340,7 @@ impl From<TomlClient> for ConfigClient {
             active,
             enter_hook,
             leave_hook,
-            link,
+            layout,
         }
     }
 }
@@ -324,7 +361,7 @@ impl From<ConfigClient> for TomlClient {
         let activate_on_startup = if client.active { Some(true) } else { None };
         let enter_hook = client.enter_hook;
         let leave_hook = client.leave_hook;
-        let link = client.link;
+        let layout = client.layout;
         Self {
             hostname,
             host_name,
@@ -334,7 +371,7 @@ impl From<ConfigClient> for TomlClient {
             activate_on_startup,
             enter_hook,
             leave_hook,
-            link,
+            layout,
         }
     }
 }

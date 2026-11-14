@@ -64,6 +64,11 @@ pub(crate) enum EmulationEvent {
         addr: SocketAddr,
         commit: [u8; 8],
     },
+    /// (VirtualKvm) peer sent its layout for us (to be mirrored)
+    PeerLayout {
+        addr: SocketAddr,
+        layout: Option<lan_mouse_ipc::DisplayLayout>,
+    },
     /// (VirtualKvm) peer announced one of its displays
     PeerDisplay {
         addr: SocketAddr,
@@ -197,6 +202,10 @@ impl ListenTask {
                                     self.listener.reply(addr, event).await;
                                 }
                                 self.event_tx.send(EmulationEvent::PeerHello { addr, commit }).expect("channel closed");
+                            }
+                            ProtoEvent::LayoutSync { present, dx, dy } => {
+                                let layout = present.then_some(lan_mouse_ipc::DisplayLayout { dx, dy });
+                                self.event_tx.send(EmulationEvent::PeerLayout { addr, layout }).expect("channel closed");
                             }
                             ProtoEvent::DisplayInfo { index, count, x, y, width, height, scale_pct } => {
                                 let display = crate::displays::remote_display(index, x, y, width, height, scale_pct);

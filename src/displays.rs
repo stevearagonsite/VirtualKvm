@@ -66,120 +66,166 @@ impl From<&DisplayInfo> for Rect {
     }
 }
 
-/// resolved geometry of a [`lan_mouse_ipc::DisplayLink`]:
-/// a local display, the side where the remote display sits and where along
-/// that edge it starts.
+/// side of a local display where a peer display touches it
+pub(crate) type Side = lan_mouse_ipc::Position;
+
+/// a stretch of a local display edge where the cursor crosses into the peer
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct LinkGeometry {
-    /// side of `local` where the remote display is
-    pub pos: lan_mouse_ipc::Position,
-    pub local: Rect,
-    /// remote display in the *peer's* coordinates (unknown until announced)
-    pub remote: Option<Rect>,
-    /// start of the remote display along the edge, relative to the start of `local`
-    pub offset: f64,
+pub(crate) struct Contact {
+    pub side: Side,
+    /// the local display whose edge this is
+    pub display: Rect,
+    /// range `[from, to)` along the edge (y for left/right, x for top/bottom)
+    pub from: f64,
+    pub to: f64,
 }
 
-impl LinkGeometry {
-    pub(crate) fn resolve(
-        link: &lan_mouse_ipc::DisplayLink,
-        pos: lan_mouse_ipc::Position,
-        local_displays: &[DisplayInfo],
-        remote_displays: &[DisplayInfo],
-    ) -> Option<Self> {
-        let local = local_displays
+/// distance (px) under which two edges count as touching
+const TOUCH: f64 = 2.0;
+
+/// resolved geometry of a [`lan_mouse_ipc::DisplayLayout`]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Layout {
+    /// our displays (local coordinates)
+    pub local: Vec<Rect>,
+    /// the peer's displays (peer coordinates)
+    pub remote: Vec<Rect>,
+    /// peer point + (dx, dy) = local point
+    pub dx: f64,
+    pub dy: f64,
+}
+
+impl Layout {
+    pub(crate) fn new(
+        layout: lan_mouse_ipc::DisplayLayout,
+        local: &[DisplayInfo],
+        remote: &[DisplayInfo],
+    ) -> Self {
+        Self {
+            local: local.iter().map(Rect::from).collect(),
+            remote: remote.iter().map(Rect::from).collect(),
+            dx: layout.dx as f64,
+            dy: layout.dy as f64,
+        }
+    }
+
+    /// the peer's displays in local coordinates
+    pub(crate) fn placed(&self) -> Vec<Rect> {
+        self.remote
             .iter()
-            .find(|d| d.matches(&link.local_display))?;
-        let remote = remote_displays
-            .get(link.remote_display as usize)
-            .map(Rect::from);
-        Some(Self {
-            pos,
-            local: local.into(),
-            remote,
-            offset: link.offset as f64,
+            .map(|r| Rect {
+                x: r.x + self.dx,
+                y: r.y + self.dy,
+                ..*r
+            })
+            .collect()
+    }
+
+    /// every stretch of a local edge touched by a peer display
+    pub(crate) fn contacts(&self) -> Vec<Contact> {
+        use lan_mouse_ipc::Position::*;
+        let mut out = Vec::new();
+        for l in &self.local {
+            for r in self.placed() {
+                let y_overlap = (l.y.max(r.y), (l.y + l.h).min(r.y + r.h));
+                let x_overlap = (l.x.max(r.x), (l.x + l.w).min(r.x + r.w));
+                let candidates = [
+                    (Left, (r.x + r.w - l.x).abs(), y_overlap),
+                    (Right, (r.x - (l.x + l.w)).abs(), y_overlap),
+                    (Top, (r.y + r.h - l.y).abs(), x_overlap),
+                    (Bottom, (r.y - (l.y + l.h)).abs(), x_overlap),
+                ];
+                for (side, gap, (from, to)) in candidates {
+                    if gap <= TOUCH && to > from {
+                        out.push(Contact {
+                            side,
+                            display: *l,
+                            from,
+                            to,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// side with the longest contact (used as the client position)
+    pub(crate) fn primary_side(&self) -> Option<Side> {
+        self.contacts()
+            .into_iter()
+            .max_by(|a, b| (a.to - a.from).total_cmp(&(b.to - b.from)))
+            .map(|c| c.side)
+    }
+
+    /// whether a peer display overlaps one of ours (invalid layout)
+    pub(crate) fn overlaps(&self) -> bool {
+        self.placed().iter().any(|r| {
+            self.local.iter().any(|l| {
+                (l.x + l.w).min(r.x + r.w) - l.x.max(r.x) > TOUCH
+                    && (l.y + l.h).min(r.y + r.h) - l.y.max(r.y) > TOUCH
+            })
         })
     }
 
-    fn horizontal(&self) -> bool {
-        matches!(
-            self.pos,
-            lan_mouse_ipc::Position::Left | lan_mouse_ipc::Position::Right
-        )
-    }
-
-    /// (start, length) of `r` along the shared edge
-    fn along(&self, r: &Rect) -> (f64, f64) {
-        if self.horizontal() {
-            (r.y, r.h)
-        } else {
-            (r.x, r.w)
-        }
-    }
-
-    /// start of the placed remote display along the edge, in local coordinates
-    fn placed_start(&self) -> f64 {
-        self.along(&self.local).0 + self.offset
-    }
-
-    fn remote_len(&self) -> f64 {
-        match &self.remote {
-            Some(r) => self.along(r).1,
-            None => self.along(&self.local).1,
-        }
-    }
-
-    /// active part `[from, to)` of the local edge (global local coordinates).
-    /// Empty (`from >= to`) if the remote display doesn't touch the local one.
-    pub(crate) fn segment(&self) -> (f64, f64) {
-        let (start, len) = self.along(&self.local);
-        let placed = self.placed_start();
-        (
-            start.max(placed),
-            (start + len).min(placed + self.remote_len()),
-        )
-    }
-
-    /// entry point on the remote display for a crossing at local `(x, y)`
-    pub(crate) fn to_remote(&self, x: f64, y: f64) -> Option<(f64, f64)> {
+    /// entry point (peer coordinates) for a crossing at local `(x, y)` through `side`
+    pub(crate) fn to_remote(&self, side: Side, x: f64, y: f64) -> Option<(f64, f64)> {
         use lan_mouse_ipc::Position::*;
-        let r = self.remote?;
-        let local_along = if self.horizontal() { y } else { x };
-        let along = (local_along - self.placed_start()).clamp(0.0, self.remote_len() - 1.0);
-        Some(match self.pos {
-            // remote is left of us: enter it at its right edge
-            Left => (r.x + r.w - 2.0, r.y + along),
-            Right => (r.x + 1.0, r.y + along),
-            Top => (r.x + along, r.y + r.h - 2.0),
-            Bottom => (r.x + along, r.y + 1.0),
-        })
-    }
-
-    /// where the local cursor should reappear when leaving the remote display at `(xr, yr)`
-    pub(crate) fn to_local(&self, xr: f64, yr: f64) -> (f64, f64) {
-        use lan_mouse_ipc::Position::*;
-        let (from, to) = self.segment();
-        let along = match &self.remote {
-            Some(r) if self.horizontal() => yr - r.y,
-            Some(r) => xr - r.x,
-            None if self.horizontal() => yr,
-            None => xr,
+        // a point just beyond the local edge
+        let (tx, ty) = match side {
+            Left => (x - 1.0, y),
+            Right => (x + 1.0, y),
+            Top => (x, y - 1.0),
+            Bottom => (x, y + 1.0),
         };
-        let local_along = (self.placed_start() + along).clamp(from, (to - 1.0).max(from));
-        let l = &self.local;
-        match self.pos {
-            Left => (l.x + 1.0, local_along),
-            Right => (l.x + l.w - 2.0, local_along),
-            Top => (local_along, l.y + 1.0),
-            Bottom => (local_along, l.y + l.h - 2.0),
-        }
+        let (rx, ry) = (tx - self.dx, ty - self.dy);
+        let r = self
+            .remote
+            .iter()
+            .filter(|r| {
+                rx >= r.x - TOUCH - 1.0
+                    && rx < r.x + r.w + TOUCH + 1.0
+                    && ry >= r.y - TOUCH - 1.0
+                    && ry < r.y + r.h + TOUCH + 1.0
+            })
+            .min_by(|a, b| dist2(a, rx, ry).total_cmp(&dist2(b, rx, ry)))?;
+        let cx = rx.clamp(r.x, r.x + r.w - 1.0);
+        let cy = ry.clamp(r.y, r.y + r.h - 1.0);
+        // enter just inside the edge we come through
+        Some(match side {
+            Left => (r.x + r.w - 2.0, cy),
+            Right => (r.x + 1.0, cy),
+            Top => (cx, r.y + r.h - 2.0),
+            Bottom => (cx, r.y + 1.0),
+        })
     }
+
+    /// where our cursor should reappear when it leaves the peer at peer `(xr, yr)`
+    pub(crate) fn to_local(&self, xr: f64, yr: f64) -> Option<(f64, f64)> {
+        let (x, y) = (xr + self.dx, yr + self.dy);
+        self.local
+            .iter()
+            .min_by(|a, b| dist2(a, x, y).total_cmp(&dist2(b, x, y)))
+            .map(|l| {
+                (
+                    x.clamp(l.x + 1.0, l.x + l.w - 2.0),
+                    y.clamp(l.y + 1.0, l.y + l.h - 2.0),
+                )
+            })
+    }
+}
+
+/// squared distance from `(x, y)` to rectangle `r` (0 inside)
+fn dist2(r: &Rect, x: f64, y: f64) -> f64 {
+    let dx = (r.x - x).max(0.0).max(x - (r.x + r.w));
+    let dy = (r.y - y).max(0.0).max(y - (r.y + r.h));
+    dx * dx + dy * dy
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lan_mouse_ipc::{DisplayLink, Position};
+    use lan_mouse_ipc::{DisplayLayout, Position};
 
     fn display(id: &str, x: i32, y: i32, w: u32, h: u32) -> DisplayInfo {
         DisplayInfo {
@@ -194,61 +240,106 @@ mod tests {
         }
     }
 
-    /// Steve's setup: Windows (1920x1080) left of the Mac's LF27T35, which
-    /// sits above the built-in display.
-    fn steve(offset: i32) -> LinkGeometry {
+    /// Steve's setup seen from the Mac: the Windows display (1920x1080) sits left
+    /// of the LF27T35, above the free left part of the built-in display.
+    fn mac() -> Layout {
         let local = [
-            display("1", 0, 0, 1512, 982),
+            display("Built-in", 0, 0, 1512, 982),
             display("LF27T35", 927, -1080, 1920, 1080),
         ];
-        let remote = [display("0", 0, 0, 1920, 1080)];
-        let link = DisplayLink {
-            local_display: "LF27T35".into(),
-            remote_display: 0,
-            offset,
-        };
-        LinkGeometry::resolve(&link, Position::Left, &local, &remote).unwrap()
+        let remote = [display("DISPLAY1", 0, 0, 1920, 1080)];
+        Layout::new(
+            DisplayLayout {
+                dx: -993,
+                dy: -1080,
+            },
+            &local,
+            &remote,
+        )
+    }
+
+    fn windows() -> Layout {
+        let local = [display("DISPLAY1", 0, 0, 1920, 1080)];
+        let remote = [
+            display("Built-in", 0, 0, 1512, 982),
+            display("LF27T35", 927, -1080, 1920, 1080),
+        ];
+        Layout::new(
+            DisplayLayout {
+                dx: -993,
+                dy: -1080,
+            }
+            .mirrored(),
+            &local,
+            &remote,
+        )
     }
 
     #[test]
-    fn aligned_segment_is_whole_edge() {
-        assert_eq!(steve(0).segment(), (-1080.0, 0.0));
+    fn both_touching_edges_are_contacts() {
+        let mut c = mac().contacts();
+        c.sort_by(|a, b| a.from.total_cmp(&b.from));
+        assert_eq!(c.len(), 2);
+        // left edge of the LF27T35, full height
+        assert_eq!(
+            (c[0].side, c[0].from, c[0].to),
+            (Position::Left, -1080.0, 0.0)
+        );
+        // top edge of the built-in display, the free part left of the LF27T35
+        assert_eq!((c[1].side, c[1].from, c[1].to), (Position::Top, 0.0, 927.0));
+        assert_eq!(mac().primary_side(), Some(Position::Left));
+        assert!(!mac().overlaps());
     }
 
     #[test]
-    fn aligned_entry_is_one_to_one() {
-        let g = steve(0);
-        assert_eq!(g.to_remote(927.0, -540.0), Some((1918.0, 540.0)));
-        assert_eq!(g.to_remote(927.0, -1080.0), Some((1918.0, 0.0)));
-        assert_eq!(g.to_remote(927.0, -1.0), Some((1918.0, 1079.0)));
+    fn entry_is_aligned_one_to_one() {
+        let g = mac();
+        // from the LF27T35's left edge at mid height
+        assert_eq!(
+            g.to_remote(Position::Left, 927.0, -540.0),
+            Some((1918.0, 540.0))
+        );
+        // up from the built-in display at x = 100 -> bottom of the Windows display
+        assert_eq!(
+            g.to_remote(Position::Top, 100.0, 0.0),
+            Some((1093.0, 1078.0))
+        );
     }
 
     #[test]
-    fn aligned_return_is_one_to_one() {
-        let g = steve(0);
-        assert_eq!(g.to_local(1.0, 300.0), (928.0, -780.0));
+    fn return_is_aligned_one_to_one() {
+        let g = mac();
+        // leaving the Windows display through its right edge at y = 300
+        assert_eq!(g.to_local(1919.0, 300.0), Some((928.0, -780.0)));
+        // leaving through its bottom edge at x = 1093
+        assert_eq!(g.to_local(1093.0, 1079.0), Some((100.0, 1.0)));
     }
 
     #[test]
-    fn offset_shifts_and_clips_segment() {
-        // remote placed 200 px lower than the local display
-        let g = steve(200);
-        assert_eq!(g.segment(), (-880.0, 0.0));
-        assert_eq!(g.to_remote(927.0, -880.0), Some((1918.0, 0.0)));
-        // returning from below the shared part clamps into the segment
-        assert_eq!(g.to_local(1.0, 1000.0), (928.0, -1.0));
+    fn mirrored_layout_matches_from_windows() {
+        let w = windows();
+        let mut c = w.contacts();
+        c.sort_by(|a, b| a.from.total_cmp(&b.from));
+        assert_eq!(c.len(), 2);
+        assert_eq!(
+            (c[0].side, c[0].from, c[0].to),
+            (Position::Right, 0.0, 1080.0)
+        );
+        assert_eq!(
+            (c[1].side, c[1].from, c[1].to),
+            (Position::Bottom, 993.0, 1920.0)
+        );
+        assert_eq!(
+            w.to_remote(Position::Right, 1919.0, 540.0),
+            Some((928.0, -540.0))
+        );
     }
 
     #[test]
-    fn unknown_remote_has_no_entry_point() {
-        let local = [display("LF27T35", 927, -1080, 1920, 1080)];
-        let link = DisplayLink {
-            local_display: "lf27t35".into(),
-            remote_display: 0,
-            offset: 0,
-        };
-        let g = LinkGeometry::resolve(&link, Position::Left, &local, &[]).unwrap();
-        assert_eq!(g.segment(), (-1080.0, 0.0));
-        assert_eq!(g.to_remote(927.0, -10.0), None);
+    fn overlapping_layout_is_detected() {
+        let local = [display("A", 0, 0, 1000, 1000)];
+        let remote = [display("B", 0, 0, 1000, 1000)];
+        assert!(Layout::new(DisplayLayout { dx: -500, dy: 0 }, &local, &remote).overlaps());
+        assert!(!Layout::new(DisplayLayout { dx: -1000, dy: 0 }, &local, &remote).overlaps());
     }
 }
