@@ -131,6 +131,8 @@ pub enum Command {
     Daemon,
     /// (VirtualKvm) web UI on localhost: display layout editor
     Web(vkvm_web::WebArgs),
+    /// (VirtualKvm) menu bar / tray icon to turn sharing on and off (runs the daemon)
+    Tray(vkvm_tray::TrayArgs),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]

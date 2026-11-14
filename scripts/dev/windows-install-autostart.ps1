@@ -1,4 +1,5 @@
-# VirtualKvm (dev): instala lan-mouse como tarea programada que arranca al iniciar sesion.
+# VirtualKvm (dev): instala el icono de bandeja (lan-mouse tray) como tarea programada que
+# arranca al iniciar sesion. La bandeja lanza y apaga el daemon.
 #
 # - Copia el binario compilado a C:\Users\<user>\vkvm\bin (asi recompilar no pisa el que corre).
 # - Arranca elevado (RunLevel Highest) para que el input llegue tambien a ventanas elevadas (UIPI).
@@ -19,6 +20,7 @@ $base = "C:\Users\$User\vkvm"
 $bin  = "$base\bin"
 $exe  = "$bin\lan-mouse.exe"
 $log  = "$base\daemon.log"
+$trayLog = "$base\tray.log"
 $task = 'vkvm-lanmouse-daemon'
 $src  = "$Repo\target\release\lan-mouse.exe"
 
@@ -41,7 +43,7 @@ foreach ($p in 'UDP', 'TCP') {
 }
 
 # tarea programada: al iniciar sesion, elevada, interactiva, con reinicio automatico
-$cmd = "`$env:RUST_LOG='info'; & '$exe' daemon *> '$log'"
+$cmd = "`$env:RUST_LOG='info'; & '$exe' tray --log '$log' *> '$trayLog'"
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$cmd`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $User

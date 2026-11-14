@@ -28,6 +28,8 @@ enum LanMouseError {
     #[error(transparent)]
     Web(#[from] vkvm_web::WebError),
     #[error(transparent)]
+    Tray(#[from] vkvm_tray::TrayError),
+    #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -61,6 +63,8 @@ fn run() -> Result<(), LanMouseError> {
             Command::TestCapture(args) => run_async(capture_test::run(config, args))?,
             Command::Cli(cli_args) => run_async(lan_mouse_cli::run(cli_args))?,
             Command::Web(args) => run_async(vkvm_web::run(args))?,
+            // the tray needs the main thread for its own event loop (no tokio runtime)
+            Command::Tray(args) => vkvm_tray::run(args)?,
             Command::Daemon => {
                 // if daemon is specified we run the service
                 match run_async(run_service(config)) {

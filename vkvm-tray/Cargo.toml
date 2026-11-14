@@ -1,0 +1,20 @@
+[package]
+name = "vkvm-tray"
+description = "Menu bar / system tray toggle for VirtualKvm"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/stevearagonsite/VirtualKvm"
+
+[dependencies]
+clap = { version = "4.4.11", features = ["derive"] }
+log = "0.4.20"
+thiserror = "2.0.0"
+lan-mouse-ipc = { path = "../lan-mouse-ipc", version = "0.3.0" }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+tray-icon = "0.26"
+tao = "0.37"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
