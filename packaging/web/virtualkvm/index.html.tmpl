@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VirtualKvm {{VERSION}} · Descargas</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body><main>
+<h1>VirtualKvm</h1>
+<p class="sub">Un mouse y un teclado para todas tus computadoras de la red local.
+Versión <b>{{VERSION}}</b> · {{DATE}} · commit <code>{{COMMIT}}</code></p>
+
+<h2>Instalar en una línea</h2>
+<div class="card">
+  <b>macOS</b> (Apple Silicon), en la Terminal:
+  <pre>curl -fsSL https://install.stevearagonsite.com/virtualkvm/install.sh | bash</pre>
+  <b>Windows 10/11</b> (x64), en PowerShell como Administrador:
+  <pre>irm https://install.stevearagonsite.com/virtualkvm/install.ps1 | iex</pre>
+  <p class="muted">Bajan la última versión, verifican el SHA-256 e instalan el ícono, que arranca al iniciar sesión.</p>
+</div>
+
+<h2>Descargas</h2>
+<table>
+  <tr><th>Sistema</th><th>Archivo</th></tr>
+  <tr><td>macOS (Apple Silicon)</td><td><a href="/virtualkvm/{{VERSION}}/VirtualKvm-{{VERSION}}-macos-arm64.zip">VirtualKvm-{{VERSION}}-macos-arm64.zip</a></td></tr>
+  <tr><td>Windows 10/11 (x64)</td><td><a href="/virtualkvm/{{VERSION}}/VirtualKvm-{{VERSION}}-windows-x64.zip">VirtualKvm-{{VERSION}}-windows-x64.zip</a></td></tr>
+  <tr><td>Checksums</td><td><a href="/virtualkvm/{{VERSION}}/SHA256SUMS">SHA256SUMS</a></td></tr>
+</table>
+<p class="muted">Siempre la última versión: <code>/virtualkvm/latest/VirtualKvm-macos-arm64.zip</code> y <code>/virtualkvm/latest/VirtualKvm-windows-x64.zip</code>.</p>
+
+<h2>Después de instalar</h2>
+<div class="card">
+  <ul>
+    <li><b>macOS, una sola vez:</b> en Ajustes → Privacidad y seguridad, agregá <code>~/.local/share/virtualkvm/VirtualKvm</code> en <b>Accesibilidad</b> y <b>Monitoreo de entrada</b>.</li>
+    <li>Cada máquina autoriza el fingerprint de la otra en <code>[authorized_fingerprints]</code> de su <code>config.toml</code>.</li>
+    <li>Ícono → <b>Monitores y opciones…</b> para ubicar los monitores de la otra máquina.</li>
+    <li>Recuperar el control: <b>Ctrl + Shift + Win + Alt</b> (macOS: <b>Ctrl + Shift + Cmd + Option</b>). Si una Windows no responde: <b>Ctrl + Alt + Supr</b> → finalizar <code>vkvm.exe</code>.</li>
+  </ul>
+  <p class="muted">Los binarios todavía no están firmados: Windows puede mostrar un aviso de SmartScreen. Solo para usar dentro de tu red local.</p>
+</div>
+
+<footer>
+  VirtualKvm está basado en <a href="https://github.com/feschber/lan-mouse">Lan Mouse</a> (Ferdinand Schober y contribuyentes).
+  Licencia GPL-3.0-or-later. Código fuente: <a href="https://github.com/stevearagonsite/VirtualKvm">github.com/stevearagonsite/VirtualKvm</a>
+  (<a href="https://github.com/stevearagonsite/VirtualKvm/tree/{{COMMIT_FULL}}">versión exacta de esta compilación</a>).
+</footer>
+</main></body>
+</html>
