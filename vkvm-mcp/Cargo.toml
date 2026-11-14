@@ -1,0 +1,16 @@
+[package]
+name = "vkvm-mcp"
+description = "MCP server: lets AI agents (Claude Code) on VirtualKvm peers talk to each other"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/stevearagonsite/VirtualKvm"
+
+[dependencies]
+lan-mouse-ipc = { path = "../lan-mouse-ipc", version = "0.3.0" }
+clap = { version = "4.4.11", features = ["derive"] }
+futures = "0.3.30"
+log = "0.4.20"
+serde_json = "1.0.107"
+thiserror = "2.0.0"
+tokio = { version = "1.32.0", features = ["io-std", "io-util", "macros", "rt", "time"] }

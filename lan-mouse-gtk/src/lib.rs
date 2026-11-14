@@ -321,7 +321,10 @@ fn build_ui(app: &Application) {
                     } => {
                         window.show_toast(format!("device entered: {addr} ({pos})").as_str());
                     }
-                    FrontendEvent::Displays(_) => {}
+                    FrontendEvent::Displays(_)
+                    | FrontendEvent::AgentMessages(_)
+                    | FrontendEvent::AgentMessageSent { .. }
+                    | FrontendEvent::AgentPeers(_) => {}
                     FrontendEvent::IncomingDisconnected(addr) => {
                         window.show_toast(format!("{addr} disconnected").as_str());
                     }

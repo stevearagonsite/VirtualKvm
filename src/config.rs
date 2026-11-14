@@ -172,6 +172,8 @@ pub enum Command {
     Web(vkvm_web::WebArgs),
     /// (VirtualKvm) menu bar / tray icon to turn sharing on and off (runs the daemon)
     Tray(vkvm_tray::TrayArgs),
+    /// (VirtualKvm) MCP server (stdio) so AI agents on the peers can message each other
+    Mcp(vkvm_mcp::McpArgs),
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]

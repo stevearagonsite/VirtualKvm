@@ -2437,6 +2437,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "vkvm-clipboard",
  "vkvm-displays",
+ "vkvm-mcp",
  "vkvm-tray",
  "vkvm-web",
  "webrtc-dtls",
@@ -4544,6 +4545,19 @@ dependencies = [
  "objc2-foundation",
  "serde",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "vkvm-mcp"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "futures",
+ "lan-mouse-ipc",
+ "log",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

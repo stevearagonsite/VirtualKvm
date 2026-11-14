@@ -11,6 +11,7 @@ members = [
     "vkvm-web",
     "vkvm-tray",
     "vkvm-clipboard",
+    "vkvm-mcp",
 ]
 
 [package]
@@ -47,6 +48,7 @@ vkvm-displays = { path = "vkvm-displays", version = "0.1.0" }
 vkvm-web = { path = "vkvm-web", version = "0.1.0" }
 vkvm-tray = { path = "vkvm-tray", version = "0.1.0" }
 vkvm-clipboard = { path = "vkvm-clipboard", version = "0.1.0" }
+vkvm-mcp = { path = "vkvm-mcp", version = "0.1.0" }
 shadow-rs = { version = "1.2.0", features = ["metadata"] }
 
 toml = "0.8"

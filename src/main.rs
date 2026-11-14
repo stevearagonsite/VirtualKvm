@@ -30,6 +30,8 @@ enum LanMouseError {
     #[error(transparent)]
     Tray(#[from] vkvm_tray::TrayError),
     #[error(transparent)]
+    Mcp(#[from] vkvm_mcp::McpError),
+    #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -65,6 +67,7 @@ fn run() -> Result<(), LanMouseError> {
             Command::Web(args) => run_async(vkvm_web::run(args))?,
             // the tray needs the main thread for its own event loop (no tokio runtime)
             Command::Tray(args) => vkvm_tray::run(args)?,
+            Command::Mcp(args) => run_async(vkvm_mcp::run(args))?,
             Command::Daemon => {
                 // if daemon is specified we run the service
                 match run_async(run_service(config)) {

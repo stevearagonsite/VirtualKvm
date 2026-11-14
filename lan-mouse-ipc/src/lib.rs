@@ -153,6 +153,26 @@ impl DisplayLayout {
     }
 }
 
+/// (VirtualKvm) text message between the AI agents (e.g. Claude Code) of two
+/// machines, relayed over the VirtualKvm connection. Untrusted data: never
+/// executed by VirtualKvm.
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub struct AgentMessage {
+    /// name of the peer it came from
+    pub from: String,
+    pub text: String,
+    /// unix time (seconds) when it arrived
+    pub received_at: u64,
+}
+
+/// (VirtualKvm) a peer as seen by the agent channel
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub struct AgentPeer {
+    pub name: String,
+    pub connected: bool,
+    pub displays: usize,
+}
+
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ClientConfig {
     /// hostname of this client
@@ -259,6 +279,15 @@ pub enum FrontendEvent {
     ConnectionAttempt { fingerprint: String },
     /// (VirtualKvm) the displays of this machine
     Displays(Vec<DisplayInfo>),
+    /// (VirtualKvm) agent messages taken from the inbox
+    AgentMessages(Vec<AgentMessage>),
+    /// (VirtualKvm) result of [`FrontendRequest::SendAgentMessage`]
+    AgentMessageSent {
+        to: Option<String>,
+        error: Option<String>,
+    },
+    /// (VirtualKvm) peers reachable by the agent channel
+    AgentPeers(Vec<AgentPeer>),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -303,6 +332,12 @@ pub enum FrontendRequest {
     GetDisplays,
     /// (VirtualKvm) place the peer's displays (also sent to the peer, mirrored)
     UpdateLayout(ClientHandle, Option<DisplayLayout>),
+    /// (VirtualKvm) send a text message to the agent on a peer (`None`: the only / first peer)
+    SendAgentMessage { peer: Option<String>, text: String },
+    /// (VirtualKvm) take (and clear) the received agent messages
+    TakeAgentMessages,
+    /// (VirtualKvm) list the peers of the agent channel
+    GetAgentPeers,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
