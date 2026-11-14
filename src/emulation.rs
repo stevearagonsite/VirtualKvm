@@ -74,6 +74,8 @@ pub(crate) enum EmulationEvent {
     DataAck {
         id: u32,
     },
+    /// (VirtualKvm) the Meta key (Win / Cmd) was tapped alone
+    MetaTap,
     /// (VirtualKvm) peer sent its layout for us (to be mirrored)
     PeerLayout {
         addr: SocketAddr,
@@ -114,6 +116,7 @@ impl Emulation {
             request_rx,
             event_tx,
             invert_scroll: invert_scroll.clone(),
+            meta_down: None,
         };
         let task = spawn_local(emulation_task.run());
         Self {
@@ -185,9 +188,38 @@ struct ListenTask {
     event_tx: Sender<EmulationEvent>,
     /// (VirtualKvm) reverse the scroll direction of remote input
     invert_scroll: Rc<Cell<bool>>,
+    /// (VirtualKvm) when a Meta (Win / Cmd) key went down with no other key since
+    meta_down: Option<std::time::Instant>,
 }
 
 impl ListenTask {
+    /// (VirtualKvm) whether `event` completes a lone tap of a Meta key (Win / Cmd):
+    /// pressed and released quickly, with no other key in between
+    fn lone_meta_tap(&mut self, event: &Event) -> bool {
+        use input_event::{KeyboardEvent, scancode::Linux};
+        const MAX_TAP: std::time::Duration = std::time::Duration::from_millis(800);
+        let Event::Keyboard(KeyboardEvent::Key { key, state, .. }) = *event else {
+            return false;
+        };
+        let meta = key == Linux::KeyLeftMeta as u32 || key == Linux::KeyRightmeta as u32;
+        match (meta, state) {
+            (true, 1) => {
+                self.meta_down = Some(std::time::Instant::now());
+                false
+            }
+            (true, 0) => self
+                .meta_down
+                .take()
+                .is_some_and(|t| t.elapsed() <= MAX_TAP),
+            // any other key: it was a combination (Win+E, Cmd+C...)
+            (false, 1) => {
+                self.meta_down = None;
+                false
+            }
+            _ => false,
+        }
+    }
+
     async fn run(mut self) {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         let mut last_response = HashMap::new();
@@ -222,6 +254,9 @@ impl ListenTask {
                                 self.listener.reply(addr, ProtoEvent::Ack(0)).await;
                             }
                             ProtoEvent::Input(event) => {
+                                if self.lone_meta_tap(&event) {
+                                    self.event_tx.send(EmulationEvent::MetaTap).expect("channel closed");
+                                }
                                 let event = if self.invert_scroll.get() { invert_scroll(event) } else { event };
                                 self.emulation_proxy.consume(event, addr)
                             }

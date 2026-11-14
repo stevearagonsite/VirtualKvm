@@ -13,3 +13,10 @@ Lan Mouse is licensed under the GNU General Public License, version 3 or
 (at your option) any later version. VirtualKvm keeps the same license:
 all modifications made in this fork are also released under
 GPL-3.0-or-later. See LICENSE for the full text.
+
+Since 2026-11-14 the user-facing names are VirtualKvm (binary `vkvm`,
+configuration directory `virtualkvm`, own IPC socket/port) so that it does
+not get confused with, or collide with, an installed Lan Mouse. The internal
+crates keep their Lan Mouse names. This rebranding does not change the
+authorship or the license of the Lan Mouse code: VirtualKvm is, and stays,
+based on Lan Mouse.

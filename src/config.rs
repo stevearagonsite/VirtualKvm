@@ -112,6 +112,9 @@ struct ConfigToml {
     language: Option<String>,
     /// (VirtualKvm) reverse the scroll direction of input coming from peers (default: false)
     invert_scroll: Option<bool>,
+    /// (VirtualKvm) URL opened when a peer taps the Meta key (Win / Cmd) alone,
+    /// e.g. "raycast://" (Raycast ignores simulated hotkeys)
+    meta_tap_url: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -135,7 +138,13 @@ impl ConfigToml {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "vkvm", author, version=build::CLAP_LONG_VERSION, about, long_about = None)]
+#[command(
+    name = "vkvm",
+    author,
+    version = build::CLAP_LONG_VERSION,
+    about = "VirtualKvm: share one mouse and keyboard across the computers of your LAN.\nBased on Lan Mouse (https://github.com/feschber/lan-mouse), GPL-3.0-or-later.",
+    long_about = None
+)]
 struct Args {
     /// the listen port for lan-mouse
     #[arg(short, long)]
@@ -558,11 +567,26 @@ impl Config {
     }
 
     /// (VirtualKvm) update the user settings (written by `write_back`)
-    pub fn set_settings(&mut self, language: &str, clipboard: bool, invert_scroll: bool) {
+    pub fn set_settings(
+        &mut self,
+        language: &str,
+        clipboard: bool,
+        invert_scroll: bool,
+        meta_tap_url: Option<String>,
+    ) {
         let c = self.config_toml.get_or_insert_with(Default::default);
         c.language = Some(language.to_owned());
         c.clipboard = Some(clipboard);
         c.invert_scroll = Some(invert_scroll);
+        c.meta_tap_url = meta_tap_url;
+    }
+
+    /// (VirtualKvm) URL to open when a peer taps the Meta key alone
+    pub fn meta_tap_url(&self) -> Option<String> {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.meta_tap_url.clone())
+            .filter(|u| !u.is_empty())
     }
 
     /// (VirtualKvm) reverse the scroll direction of input coming from peers

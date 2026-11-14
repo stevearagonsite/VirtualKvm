@@ -1,5 +1,7 @@
 # Conectar los Claude Code de dos máquinas con VirtualKvm
 
+> VirtualKvm está basado en [Lan Mouse](https://github.com/feschber/lan-mouse) (Ferdinand Schober y contribuyentes, GPL-3.0-or-later). Ver [NOTICE](../NOTICE).
+
 Los Claude Code de cada máquina se mandan mensajes por la misma conexión cifrada que VirtualKvm
 usa para el mouse y el teclado. Esa conexión es solo de la LAN y está autorizada por el fingerprint
 del certificado de cada máquina, así que **no hacen falta claves SSH**. Son mensajes de texto:

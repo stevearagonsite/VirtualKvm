@@ -175,6 +175,9 @@ pub struct Settings {
     /// reverse the scroll direction of input coming from peers
     #[serde(default)]
     pub invert_scroll: bool,
+    /// open Raycast when a peer taps the Meta key (Win / Cmd) alone
+    #[serde(default)]
+    pub meta_tap_raycast: bool,
 }
 
 /// (VirtualKvm) a peer as seen by the agent channel

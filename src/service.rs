@@ -226,8 +226,9 @@ impl Service {
                     s.clipboard,
                     s.invert_scroll
                 );
+                let meta_tap_url = s.meta_tap_raycast.then(|| "raycast://".to_owned());
                 self.config
-                    .set_settings(language, s.clipboard, s.invert_scroll);
+                    .set_settings(language, s.clipboard, s.invert_scroll, meta_tap_url);
                 self.emulation.set_invert_scroll(s.invert_scroll);
                 self.save_config();
                 self.notify_settings();
@@ -422,6 +423,12 @@ impl Service {
                 self.handle_data_in(crate::data::DataIn::Packet { from, packet })
             }
             EmulationEvent::DataAck { id } => self.data.acked(id),
+            EmulationEvent::MetaTap => {
+                if let Some(url) = self.config.meta_tap_url() {
+                    log::info!("Meta tapped alone: opening {url}");
+                    open_url(&url);
+                }
+            }
             EmulationEvent::PeerLayout { addr, layout } => {
                 let Some(handle) = self.peer_client(addr) else {
                     log::warn!("{addr} sent a layout, but it is not a configured client");
@@ -718,6 +725,7 @@ impl Service {
             language: self.config.language(),
             clipboard: self.config.clipboard_sharing(),
             invert_scroll: self.config.invert_scroll(),
+            meta_tap_raycast: self.config.meta_tap_url().is_some(),
         };
         self.notify_frontend(FrontendEvent::Settings(settings));
     }
@@ -979,4 +987,24 @@ fn peer_name(handle: ClientHandle, config: &lan_mouse_ipc::ClientConfig) -> Stri
         .clone()
         .or_else(|| config.fix_ips.first().map(|ip| ip.to_string()))
         .unwrap_or_else(|| format!("client {handle}"))
+}
+
+/// (VirtualKvm) open a URL with the desktop's handler. On Windows it goes through
+/// explorer.exe so the target app starts in the user's normal (not elevated) context.
+fn open_url(url: &str) {
+    #[cfg(windows)]
+    let r = {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("explorer.exe")
+            .arg(url)
+            .creation_flags(0x0800_0000)
+            .spawn()
+    };
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = r {
+        log::warn!("could not open {url}: {e}");
+    }
 }

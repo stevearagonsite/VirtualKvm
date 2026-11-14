@@ -70,6 +70,9 @@
   <section class="card" id="stage"><svg id="svg"></svg></section>
   <aside class="card" id="panel"><p class="hint">…</p></aside>
 </main>
+<footer style="padding:0 20px 20px;color:var(--muted);font-size:12px">
+  VirtualKvm · <span id="based">basado en</span> <a href="https://github.com/feschber/lan-mouse" target="_blank" rel="noopener" style="color:inherit">Lan Mouse</a> · GPL-3.0-or-later
+</footer>
 
 <script>
 "use strict";
@@ -95,7 +98,8 @@ const I18N = {
     saved: "Guardado ✓ (también en la otra máquina)", cleared: "Layout quitado: se usa el borde de todo el escritorio.",
     error: "Error: ", options: "Opciones", language: "Idioma", clipboard: "Compartir el portapapeles (texto) al pasar el mouse",
     invertScroll: "Invertir el scroll del mouse que viene de otra máquina (para que coincida con LinearMouse / tu configuración)",
-    optionsSaved: "Opciones guardadas ✓",
+    metaRaycast: "La tecla Windows / Cmd sola abre Raycast en esta máquina (Raycast ignora las teclas simuladas)",
+    optionsSaved: "Opciones guardadas ✓", based: "basado en",
   },
   en: {
     title: "VirtualKvm · Displays", lgLocal: "This machine (real position of its displays)",
@@ -117,7 +121,8 @@ const I18N = {
     saved: "Saved ✓ (on the other machine too)", cleared: "Layout removed: the edge of the whole desktop is used.",
     error: "Error: ", options: "Options", language: "Language", clipboard: "Share the clipboard (text) when the mouse moves over",
     invertScroll: "Reverse the scroll of the mouse coming from another machine (to match LinearMouse / your settings)",
-    optionsSaved: "Options saved ✓",
+    metaRaycast: "Tapping the Windows / Cmd key alone opens Raycast on this machine (Raycast ignores simulated hotkeys)",
+    optionsSaved: "Options saved ✓", based: "based on",
   },
 };
 let lang = (navigator.language || "es").startsWith("es") ? "es" : "en";
@@ -125,7 +130,7 @@ const t = (k, ...a) => { const v = I18N[lang][k]; return typeof v === "function"
 function applyStatic() {
   document.getElementById("html").lang = lang;
   document.title = t("title");
-  for (const [id, k] of [["title", "title"], ["lg-local", "lgLocal"], ["lg-remote", "lgRemote"], ["lg-seg", "lgSeg"]])
+  for (const [id, k] of [["title", "title"], ["lg-local", "lgLocal"], ["lg-remote", "lgRemote"], ["lg-seg", "lgSeg"], ["based", "based"]])
     document.getElementById(id).textContent = t(k);
 }
 // VirtualKvm layout editor (layout v2): the peer's displays are placed as a group
@@ -321,24 +326,25 @@ async function clearLayout(c) {
 
 // ---------- options ----------
 function optionsHtml() {
-  const st = (snap && snap.settings) || { language: lang, clipboard: true, invert_scroll: false };
+  const st = (snap && snap.settings) || { language: lang, clipboard: true, invert_scroll: false, meta_tap_raycast: false };
   return `<hr><h2>${t("options")}</h2>
     <label>${t("language")}
       <select id="opt-lang"><option value="es" ${st.language === "es" ? "selected" : ""}>Español</option><option value="en" ${st.language === "en" ? "selected" : ""}>English</option></select>
     </label>
     <label class="check"><input type="checkbox" id="opt-clip" ${st.clipboard ? "checked" : ""}> ${t("clipboard")}</label>
-    <label class="check"><input type="checkbox" id="opt-scroll" ${st.invert_scroll ? "checked" : ""}> ${t("invertScroll")}</label>`;
+    <label class="check"><input type="checkbox" id="opt-scroll" ${st.invert_scroll ? "checked" : ""}> ${t("invertScroll")}</label>
+    <label class="check"><input type="checkbox" id="opt-meta" ${st.meta_tap_raycast ? "checked" : ""}> ${t("metaRaycast")}</label>`;
 }
 function bindOptions() {
-  const l = panel.querySelector("#opt-lang"), c = panel.querySelector("#opt-clip"), sc = panel.querySelector("#opt-scroll");
-  if (!l || !c || !sc) return;
+  const l = panel.querySelector("#opt-lang"), c = panel.querySelector("#opt-clip"), sc = panel.querySelector("#opt-scroll"), mt = panel.querySelector("#opt-meta");
+  if (!l || !c || !sc || !mt) return;
   const save = async () => {
     try {
-      await api("/api/settings", { method: "POST", body: JSON.stringify({ language: l.value, clipboard: c.checked, invert_scroll: sc.checked }) });
+      await api("/api/settings", { method: "POST", body: JSON.stringify({ language: l.value, clipboard: c.checked, invert_scroll: sc.checked, meta_tap_raycast: mt.checked }) });
       lang = l.value; applyStatic(); setMsg(t("optionsSaved"), "ok"); await refresh();
     } catch (e) { setMsg(t("error") + e.message, "bad"); }
   };
-  l.onchange = save; c.onchange = save; sc.onchange = save;
+  l.onchange = save; c.onchange = save; sc.onchange = save; mt.onchange = save;
 }
 
 // ---------- polling ----------

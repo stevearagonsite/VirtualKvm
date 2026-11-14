@@ -1,6 +1,7 @@
 # VirtualKvm — Plan y research inicial
 
-> Fecha: 2026-11-12 · Estado: **Fase 0 (research)**.
+> Creado: 2026-11-12 · Actualizado: 2026-11-14 · Estado: fases 0, 1 y 3 hechas, partes de la 2 y la 5 adelantadas (ver §10).
+> Binario: **`vkvm`** · Config: `~/.config/virtualkvm/` (`%LOCALAPPDATA%\virtualkvm\` en Windows).
 > **VirtualKvm es un fork de [Lan Mouse](https://github.com/feschber/lan-mouse)** (Ferdinand Schober y contribuyentes),
 > tomado del commit `69958c6` (después de v0.11.0). Mantiene su historia, su autoría y su licencia
 > **GPL-3.0-or-later**, y sigue siendo open source. Ver [NOTICE](NOTICE).
@@ -60,19 +61,21 @@ Streaming de video o escritorio remoto, archivos, audio, acceso por Internet, m�
 - **Atribución:** README con aviso al principio, archivo `NOTICE` y toda la historia de git del original. No se borra ningún copyright ni autoría existente.
 - **Licencia:** todo lo que agreguemos también es GPL-3.0-or-later. Las dependencias nuevas tienen que ser compatibles con GPL-3; el `deny.toml` del upstream ya lo controla.
 - **Upstream:** traemos sus cambios seguido (`git fetch upstream && git merge upstream/main`). Lo que sea útil en general (por ejemplo, el backend uinput) se ofrece de vuelta como PR a Lan Mouse.
-- **Divergencia mínima:** el código nuevo va en crates nuevos. Los crates existentes se tocan lo menos posible para que los merges con el upstream sean simples. El binario y los nombres de crates (`lan-mouse`, `input-capture`, …) se mantienen por ahora; renombrar es una decisión para más adelante.
+- **Divergencia mínima:** el código nuevo va en crates nuevos (`vkvm-*`). Los crates existentes se tocan lo menos posible para que los merges con el upstream sean simples, y **conservan sus nombres** (`input-capture`, `lan-mouse-ipc`, …).
+- **Rebranding (2026-11-14):** lo que ve el usuario se llama VirtualKvm, para no confundirse ni chocar con una instalación de Lan Mouse: binario `vkvm`, config en `virtualkvm/` (se migra sola desde `lan-mouse/`), socket IPC `vkvm.sock` y puerto IPC de Windows 5262. La atribución a Lan Mouse queda siempre declarada en README, NOTICE y cada documento.
 
 ### Lo que Lan Mouse no tiene y agregamos
 
 | Falta en Lan Mouse | Qué agregamos | Fase |
 |---|---|---|
 | Sin backend **uinput**: sin entorno gráfico no recibe nada, así que Ubuntu Server queda afuera | Backend `uinput` en `input-emulation` (candidato a PR upstream) | 4 |
-| La posición es un borde por cliente (izq/der/arriba/abajo), **sin layout por monitor** | Enumeración de monitores por SO + editor de layout | 3 |
-| UI solo en GTK | **UI web en localhost** + TUI | 3, 4 |
-| IPs u hostnames a mano | **Discovery mDNS** | 2 |
+| La posición es un borde por cliente (izq/der/arriba/abajo), **sin layout por monitor** | Enumeración de monitores por SO + layout compartido por monitor (`vkvm-displays`) | 3 ✅ |
+| UI solo en GTK | **UI web en localhost** (`vkvm web`) ✅ + ícono de bandeja (`vkvm tray`) ✅ + TUI | 3, 4 |
+| IPs u hostnames a mano | Peer reconocido por certificado aunque cambie la IP ✅ · **Discovery mDNS** | 2 |
 | Sin WoL | **Wake-on-LAN** desde la UI | 2 |
 | Sin filtros de red | **Garantías LAN-only** (§7) | 2 |
-| Sin portapapeles | Texto, tomando como referencia Mousehop | 5 |
+| Sin portapapeles | Texto que viaja con el cursor (`vkvm-clipboard`) ✅ | 5 |
+| — | Canal de mensajes entre agentes de IA (`vkvm mcp`) ✅ | — |
 | En Windows no llega a login ni UAC; sin mouse físico el cursor no se ve | Servicio de Windows con IPC autenticada; investigar el cursor | 5 |
 | Sin captura en X11 | Baja prioridad (Ubuntu usa Wayland por defecto) | — |
 
@@ -83,13 +86,13 @@ configuración. Agregamos una API local y discovery al lado del daemon existente
 
 ```
                  ┌──────────────────────── nodo (Mac) ──────────────────────────────┐
- teclado/mouse → │ input-capture ─→ daemon lan-mouse ─→ UDP + DTLS :4242 ═══════════╪══╗
+ teclado/mouse → │ input-capture ─→ daemon vkvm ──────→ UDP + DTLS :4242 ═══════════╪══╗
                  │                       ↑  lan-mouse-ipc                           │  ║ LAN
                  │   vkvm-web (axum, 127.0.0.1) ←── navegador · vkvm-tui · CLI      │  ║ (solo)
                  │   vkvm-displays · vkvm-discovery (mDNS) · vkvm-wol               │  ║
                  └──────────────────────────────────────────────────────────────────┘  ║
                  ┌──────────────────────── nodo (Windows) ──────────────────────────┐  ║
-                 │ daemon lan-mouse ─→ input-emulation (SendInput) ─→ SO            │◀═╝
+                 │ daemon vkvm ─→ input-emulation (SendInput) ─→ SO                 │◀═╝
                  │ vkvm-displays reporta monitores (EnumDisplayMonitors)            │
                  └──────────────────────────────────────────────────────────────────┘
 ```
@@ -167,17 +170,17 @@ Crates candidatos para lo nuevo (versiones al 12-nov-2026): `evdev` 0.13, `mdns-
 
 - **Web (localhost):** `axum` (REST + WebSocket para estado en vivo) que habla con el daemon por `lan-mouse-ipc`, con el frontend embebido con `rust-embed` (sin servidor aparte). Pantallas: nodos (online, latencia, despertar, fingerprints), **editor de layout**, hotkeys, diagnóstico de red y permisos. Frontend liviano (Svelte, Preact o vanilla TS); se decide en la fase 3.
 - **TUI (`ratatui`):** la misma API. Pensada para Ubuntu Server y SSH.
-- **CLI:** la de Lan Mouse (`lan-mouse cli`, `lan-mouse daemon`), más subcomandos nuevos (`wake`, `discover`).
+- **CLI:** la de Lan Mouse, con el binario renombrado (`vkvm cli`, `vkvm daemon`), más `vkvm web`, `vkvm tray` y `vkvm mcp`. Pendientes: `wake`, `discover`.
 - La GUI GTK del upstream queda como está.
 
 ## 10. Roadmap por fases
 
 | Fase | Entregable | Criterio de "listo" |
 |---|---|---|
-| **0. Research + fork** (hoy) | Este plan, fork con atribución, sesión Windows conectada | Hecho cuando la Windows completa el inventario (§11) |
-| **1. Línea base** | Compilar y correr Lan Mouse **sin cambios** en Mac y Windows. Mac → Windows por cable. Anotar qué funciona y qué no (teclas, rueda, escalas, cursor invisible, latencia) | Usar la Windows desde la Mac 1 h. Lista de problemas reales |
+| **0. Research + fork** ✅ | Este plan, fork con atribución, sesión Windows conectada | Hecho cuando la Windows completa el inventario (§11) |
+| **1. Línea base** ✅ | Compilar y correr Lan Mouse **sin cambios** en Mac y Windows. Mac → Windows por cable. Anotar qué funciona y qué no (teclas, rueda, escalas, cursor invisible, latencia) | Usar la Windows desde la Mac 1 h. Lista de problemas reales |
 | **2. Red** | `vkvm-discovery` (mDNS), `vkvm-wol`, filtros LAN-only | Cambiar la IP de la Windows no rompe nada. Despertarla desde la Mac |
-| **3. UI web + monitores** | `vkvm-displays`, `vkvm-web`, editor de layout, elegir el servidor desde la UI | Reordenar monitores en la UI cambia los bordes en vivo. Usar la Mac desde la Windows |
+| **3. UI web + monitores** ✅ | `vkvm-displays`, `vkvm-web`, editor de layout, elegir el servidor desde la UI | Reordenar monitores en la UI cambia los bordes en vivo. Usar la Mac desde la Windows |
 | **4. Linux** | Backend uinput (PR upstream), Ubuntu Desktop (libei existente), Ubuntu Server (TTY, systemd), `vkvm-tui` | Escribir en la consola del server desde la Mac |
 | **5. Pulido** | Portapapeles de texto, servicio de Windows para login/UAC con IPC autenticada, firma y notarización en macOS, releases | Instaladores en GitHub Releases |
 | Futuro | KVM real: video y escritorio remoto | — |

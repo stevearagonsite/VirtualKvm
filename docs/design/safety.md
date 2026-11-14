@@ -1,5 +1,7 @@
 # Diseño: no perder nunca el control de una máquina
 
+> VirtualKvm está basado en [Lan Mouse](https://github.com/feschber/lan-mouse) (Ferdinand Schober y contribuyentes, GPL-3.0-or-later). Ver [NOTICE](../../NOTICE).
+
 > Estado: **propuesto** (2026-11-14). Las secciones "Hoy" y "Qué hacer si se traba" describen lo que ya funciona.
 
 ## Problema

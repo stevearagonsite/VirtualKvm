@@ -1,5 +1,7 @@
 # Diseño: layout por monitor + interfaz gráfica
 
+> VirtualKvm está basado en [Lan Mouse](https://github.com/feschber/lan-mouse) (Ferdinand Schober y contribuyentes, GPL-3.0-or-later). Ver [NOTICE](../../NOTICE).
+
 > Estado: implementado (branch `feat/layout-gui`, PR #4) · Fase 3 de `PLAN.md`. Binario: `vkvm`.
 
 ## Problema
@@ -66,8 +68,8 @@ Limitaciones actuales:
 | `input-emulation` | `Emulation::warp(x, y)` con no-op por defecto. Windows: `SetCursorPos`. macOS: `CGWarpMouseCursorPosition` |
 | `vkvm-displays` (crate nuevo) | Enumeración de monitores: macOS (CoreGraphics) y Windows (`EnumDisplayMonitors` + `GetDpiForMonitor`) |
 | daemon (`src/`) | El receptor manda sus `DisplayInfo` al recibir `Hello`. El emisor los guarda por cliente. Mapeo de entrada y salida con el link. Config `[clients.link]` |
-| `lan-mouse-ipc` | `FrontendRequest::{GetDisplays, UpdateLink}`, `FrontendEvent::Displays{local, remote}` |
-| UI web (`lan-mouse web`) | `axum` en `127.0.0.1:4243` con token. Una página (HTML + JS, sin build) dibuja los monitores locales en su posición real; los remotos se arrastran, se pegan al borde más cercano y guardan el link |
+| `lan-mouse-ipc` | `FrontendRequest::{GetDisplays, UpdateLayout}`, `FrontendEvent::Displays`, monitores del peer en `ClientState` |
+| UI web (`vkvm web`) | `axum` en `127.0.0.1:4243` con token. Una página (HTML + JS, sin build) dibuja los monitores locales en su posición real; los remotos se arrastran, se pegan al borde más cercano y guardan el link |
 
 ## Orden de implementación
 

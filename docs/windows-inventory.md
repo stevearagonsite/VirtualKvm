@@ -1,5 +1,7 @@
 # Inventario: PC Windows (Phatom-Desktop)
 
+> VirtualKvm está basado en [Lan Mouse](https://github.com/feschber/lan-mouse) (Ferdinand Schober y contribuyentes, GPL-3.0-or-later). Ver [NOTICE](../NOTICE).
+
 > Relevado el 2026-11-12 por SSH desde la Mac, con `scripts/dev/windows-inventory.ps1` (sesión SSH)
 > y `scripts/dev/windows-displays.ps1` (tarea programada en la sesión interactiva del usuario).
 > Cierra #1. Por ser un repo público, se omiten la MAC completa y las direcciones IPv6 globales.
@@ -68,5 +70,5 @@ activa, aparecería como otro monitor: hay que tenerlo en cuenta en `vkvm-displa
 - OpenSSH Server de Windows 9.5. Solo clave (`PasswordAuthentication no`). Firewall: perfil `Private`, `RemoteAddress=LocalSubnet`.
 - Shell por defecto: Windows PowerShell 5.1.
 - Lo que corre por SSH **no tiene escritorio**. Para lo que necesita la sesión del usuario (monitores,
-  `SendInput`, correr Lan Mouse) se usa una tarea programada con `LogonType Interactive`, como en
+  `SendInput`, correr VirtualKvm) se usa una tarea programada con `LogonType Interactive`, como en
   `windows-displays.ps1`.
