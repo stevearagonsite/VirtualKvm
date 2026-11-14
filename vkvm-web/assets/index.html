@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="es">
+<html lang="es" id="html">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VirtualKvm · Monitores</title>
+<title>VirtualKvm</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085; --line: #d9dde5;
@@ -52,25 +52,82 @@
   .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); padding: 0 20px; flex-wrap: wrap; }
   .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 4px; }
   .empty { padding: 40px; text-align: center; color: var(--muted); }
+  hr { border: 0; border-top: 1px solid var(--line); margin: 4px 0; width: 100%; }
+  .check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 13px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>VirtualKvm · Monitores</h1>
+  <h1 id="title">VirtualKvm</h1>
   <span class="status" id="status">conectando…</span>
 </header>
 <div class="legend">
-  <span><span class="sw" style="background:var(--local-fill);border:1.5px solid var(--local)"></span>Esta máquina (posición de macOS / Windows)</span>
-  <span><span class="sw" style="background:var(--remote-fill);border:2px solid var(--remote)"></span>Monitores de la otra máquina (arrastralos juntos)</span>
-  <span><span class="sw" style="background:var(--seg)"></span>Bordes por donde pasa el mouse</span>
+  <span><span class="sw" style="background:var(--local-fill);border:1.5px solid var(--local)"></span><span id="lg-local"></span></span>
+  <span><span class="sw" style="background:var(--remote-fill);border:2px solid var(--remote)"></span><span id="lg-remote"></span></span>
+  <span><span class="sw" style="background:var(--seg)"></span><span id="lg-seg"></span></span>
 </div>
 <main>
   <section class="card" id="stage"><svg id="svg"></svg></section>
-  <aside class="card" id="panel"><p class="hint">Esperando datos del daemon…</p></aside>
+  <aside class="card" id="panel"><p class="hint">…</p></aside>
 </main>
 
 <script>
 "use strict";
+
+const I18N = {
+  es: {
+    title: "VirtualKvm · Monitores", lgLocal: "Esta máquina (posición real de sus monitores)",
+    lgRemote: "Monitores de la otra máquina (arrastralos juntos)", lgSeg: "Bordes por donde pasa el mouse",
+    connecting: "conectando…", status: (l, c) => `daemon conectado · ${l} monitor(es) locales · ${c} cliente(s)`,
+    disconnected: "daemon desconectado", badToken: "token inválido: abrí la URL que imprimió `vkvm web`",
+    noClients: "No hay clientes configurados.", client: "Cliente", machine: "Máquina",
+    displays: n => `${n} monitor(es)`, connected: "conectada",
+    horizontal: "Horizontal (px) — positivo = a la derecha", vertical: "Vertical (px) — positivo = más abajo",
+    crossesAt: "El mouse pasa por:", edge: (side, name, len) => `• borde ${side} de <b>${name}</b> (${len} px)`,
+    sides: { left: "izquierdo", right: "derecho", top: "superior", bottom: "inferior" },
+    notTouching: "Los monitores no se tocan: no hay por dónde pasar.", overlapping: "Se superponen: corregilo antes de guardar.",
+    suggested: "Posición sugerida: todavía no hay layout guardado.", unsaved: "Hay cambios sin guardar.",
+    save: "Guardar", clear: "Quitar layout",
+    help: "Arrastrá los monitores naranjas (se mueven juntos) hasta que toquen los tuyos: se pegan solos a los bordes. Lo que guardes acá se aplica también en la otra máquina.",
+    estimated: " (estimado: esperando al peer)", monitor: i => `Monitor ${i}`,
+    dropOnEdge: "Se superpone con un monitor tuyo: soltalo pegado al borde.",
+    notSavedOverlap: "No se guardó: los monitores se superponen.", notSavedTouch: "No se guardó: los monitores no se tocan.",
+    saved: "Guardado ✓ (también en la otra máquina)", cleared: "Layout quitado: se usa el borde de todo el escritorio.",
+    error: "Error: ", options: "Opciones", language: "Idioma", clipboard: "Compartir el portapapeles (texto) al pasar el mouse",
+    invertScroll: "Invertir el scroll del mouse que viene de otra máquina (para que coincida con LinearMouse / tu configuración)",
+    optionsSaved: "Opciones guardadas ✓",
+  },
+  en: {
+    title: "VirtualKvm · Displays", lgLocal: "This machine (real position of its displays)",
+    lgRemote: "Displays of the other machine (drag them together)", lgSeg: "Edges the mouse crosses",
+    connecting: "connecting…", status: (l, c) => `daemon connected · ${l} local display(s) · ${c} client(s)`,
+    disconnected: "daemon disconnected", badToken: "invalid token: open the URL printed by `vkvm web`",
+    noClients: "No clients configured.", client: "Client", machine: "Machine",
+    displays: n => `${n} display(s)`, connected: "connected",
+    horizontal: "Horizontal (px) — positive = to the right", vertical: "Vertical (px) — positive = lower",
+    crossesAt: "The mouse crosses at:", edge: (side, name, len) => `• ${side} edge of <b>${name}</b> (${len} px)`,
+    sides: { left: "left", right: "right", top: "top", bottom: "bottom" },
+    notTouching: "The displays don't touch: there is nowhere to cross.", overlapping: "They overlap: fix it before saving.",
+    suggested: "Suggested position: no layout saved yet.", unsaved: "There are unsaved changes.",
+    save: "Save", clear: "Remove layout",
+    help: "Drag the orange displays (they move together) until they touch yours: they snap to the edges. What you save here is applied on the other machine too.",
+    estimated: " (estimated: waiting for the peer)", monitor: i => `Display ${i}`,
+    dropOnEdge: "It overlaps one of your displays: drop it against an edge.",
+    notSavedOverlap: "Not saved: the displays overlap.", notSavedTouch: "Not saved: the displays don't touch.",
+    saved: "Saved ✓ (on the other machine too)", cleared: "Layout removed: the edge of the whole desktop is used.",
+    error: "Error: ", options: "Options", language: "Language", clipboard: "Share the clipboard (text) when the mouse moves over",
+    invertScroll: "Reverse the scroll of the mouse coming from another machine (to match LinearMouse / your settings)",
+    optionsSaved: "Options saved ✓",
+  },
+};
+let lang = (navigator.language || "es").startsWith("es") ? "es" : "en";
+const t = (k, ...a) => { const v = I18N[lang][k]; return typeof v === "function" ? v(...a) : v; };
+function applyStatic() {
+  document.getElementById("html").lang = lang;
+  document.title = t("title");
+  for (const [id, k] of [["title", "title"], ["lg-local", "lgLocal"], ["lg-remote", "lgRemote"], ["lg-seg", "lgSeg"]])
+    document.getElementById(id).textContent = t(k);
+}
 // VirtualKvm layout editor (layout v2): the peer's displays are placed as a group
 // at local = remote + (dx, dy); the cursor crosses wherever displays touch.
 const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
@@ -87,7 +144,7 @@ let message = { text: "", cls: "" };
 
 async function api(path, opts = {}) {
   const r = await fetch(path, { ...opts, headers: { "x-vkvm-token": token, "content-type": "application/json" } });
-  if (!r.ok) throw new Error(r.status === 401 ? "token inválido: abrí la URL que imprimió `vkvm web`" : "HTTP " + r.status);
+  if (!r.ok) throw new Error(r.status === 401 ? t("badToken") : "HTTP " + r.status);
   return r.status === 204 ? null : r.json();
 }
 const clientName = c => c.config.hostname || (c.config.fix_ips[0] ?? ("cliente " + c.handle));
@@ -96,8 +153,8 @@ const rect = d => ({ x: d.x, y: d.y, w: d.width, h: d.height });
 // ---------- model ----------
 function remotes(c) {
   const r = c.state.remote_displays;
-  return r.length ? r.map((d, i) => ({ ...rect(d), label: d.name || `Monitor ${i + 1}`, known: true }))
-                  : [{ x: 0, y: 0, w: 1920, h: 1080, label: "Monitor 1", known: false }];
+  return r.length ? r.map((d, i) => ({ ...rect(d), label: t("monitor", i + 1), known: true }))
+                  : [{ x: 0, y: 0, w: 1920, h: 1080, label: t("monitor", 1), known: false }];
 }
 function bbox(rs) {
   return rs.reduce((b, r) => ({ x0: Math.min(b.x0, r.x), y0: Math.min(b.y0, r.y), x1: Math.max(b.x1, r.x + r.w), y1: Math.max(b.y1, r.y + r.h) }),
@@ -179,7 +236,7 @@ function render() {
   }
   const group = el("g", { class: "remote" + (drag ? " dragging" : "") + (lay.saved ? "" : " unlinked") }, svg);
   for (const r of placed(c, lay)) {
-    const e = drawRect(r, "", `${clientName(c)} · ${r.label}`, `${r.w}×${r.h}` + (r.known ? "" : " (estimado: esperando al peer)"), group);
+    const e = drawRect(r, "", `${clientName(c)} · ${r.label}`, `${r.w}×${r.h}` + (r.known ? "" : t("estimated")), group);
     e.addEventListener("pointerdown", ev => startDrag(ev, c, lay));
   }
 }
@@ -200,44 +257,43 @@ svg.addEventListener("pointerup", async () => {
   if (!drag) return;
   const c = snap.clients.find(c => c.handle === drag.handle), lay = drag.lay;
   drag = null;
-  if (overlaps(c, lay)) { setMsg("Se superpone con un monitor tuyo: soltalo pegado al borde.", "bad"); render(); return; }
+  if (overlaps(c, lay)) { setMsg(t("dropOnEdge"), "bad"); render(); return; }
   draft[c.handle] = lay; render(); renderPanel();
   await save(c);
 });
 
 // ---------- side panel ----------
 function setMsg(text, cls) { message = { text, cls }; const m = document.getElementById("msg"); if (m) { m.textContent = text; m.className = "msg " + cls; } }
-const SIDE = { left: "izquierdo", right: "derecho", top: "superior", bottom: "inferior" };
 
 function renderPanel() {
   if (!snap) return;
-  if (!snap.clients.length) { panel.innerHTML = '<p class="hint">No hay clientes configurados.</p>'; return; }
+  if (!snap.clients.length) { panel.innerHTML = `<p class="hint">${t("noClients")}</p>` + optionsHtml(); bindOptions(); return; }
   if (!snap.clients.some(c => c.handle === selected)) selected = snap.clients[0].handle;
   const c = snap.clients.find(c => c.handle === selected), lay = layoutOf(c), ks = contacts(c, lay);
   const active = document.activeElement && document.activeElement.id;
   const local = snap.local.map(rect);
   const onDisplay = k => snap.local.find(d => { const L = rect(d); return (k.side === "left" && L.x === k.edge) || (k.side === "right" && L.x + L.w === k.edge) || (k.side === "top" && L.y === k.edge) || (k.side === "bottom" && L.y + L.h === k.edge); });
   panel.innerHTML = `
-    <h2>Cliente</h2>
-    <label>Máquina
-      <select id="client">${snap.clients.map(x => `<option value="${x.handle}" ${x.handle === selected ? "selected" : ""}>${clientName(x)} · ${x.state.remote_displays.length} monitor(es)${x.state.alive ? " · conectada" : ""}</option>`).join("")}</select>
+    <h2>${t("client")}</h2>
+    <label>${t("machine")}
+      <select id="client">${snap.clients.map(x => `<option value="${x.handle}" ${x.handle === selected ? "selected" : ""}>${clientName(x)} · ${t("displays", x.state.remote_displays.length)}${x.state.alive ? " · " + t("connected") : ""}</option>`).join("")}</select>
     </label>
-    <label>Horizontal (px) — positivo = a la derecha
+    <label>${t("horizontal")}
       <div class="row"><button data-a="dx" data-d="-10">−10</button><button data-a="dx" data-d="-1">−1</button>
         <input id="dx" type="number" value="${lay.dx}"><button data-a="dx" data-d="1">+1</button><button data-a="dx" data-d="10">+10</button></div>
     </label>
-    <label>Vertical (px) — positivo = más abajo
+    <label>${t("vertical")}
       <div class="row"><button data-a="dy" data-d="-10">−10</button><button data-a="dy" data-d="-1">−1</button>
         <input id="dy" type="number" value="${lay.dy}"><button data-a="dy" data-d="1">+1</button><button data-a="dy" data-d="10">+10</button></div>
     </label>
-    <p class="hint">${ks.length ? "El mouse pasa por:<br>" + ks.map(k => `• borde ${SIDE[k.side]} de <b>${(onDisplay(k) || {}).name || "?"}</b> (${Math.round(k.to - k.from)} px)`).join("<br>")
-        : '<span style="color:var(--bad)">Los monitores no se tocan: no hay por dónde pasar.</span>'}
-      ${overlaps(c, lay) ? '<br><span style="color:var(--bad)">Se superponen: corregilo antes de guardar.</span>' : ""}
-      ${lay.saved ? "" : (lay.suggested ? "<br>Posición sugerida: todavía no hay layout guardado." : "<br>Hay cambios sin guardar.")}</p>
-    <div class="row"><button class="primary" id="save">Guardar</button><button id="clear" ${c.config.layout ? "" : "disabled"}>Quitar layout</button></div>
+    <p class="hint">${ks.length ? t("crossesAt") + "<br>" + ks.map(k => t("edge", t("sides")[k.side], (onDisplay(k) || {}).name || "?", Math.round(k.to - k.from))).join("<br>")
+        : `<span style="color:var(--bad)">${t("notTouching")}</span>`}
+      ${overlaps(c, lay) ? `<br><span style="color:var(--bad)">${t("overlapping")}</span>` : ""}
+      ${lay.saved ? "" : "<br>" + (lay.suggested ? t("suggested") : t("unsaved"))}</p>
+    <div class="row"><button class="primary" id="save">${t("save")}</button><button id="clear" ${c.config.layout ? "" : "disabled"}>${t("clear")}</button></div>
     <div id="msg" class="msg ${message.cls}">${message.text}</div>
-    <p class="hint">Arrastrá los monitores naranjas (se mueven juntos) hasta que toquen los tuyos: se pegan solos a los bordes.
-      Lo que guardes acá se aplica también en la otra máquina.</p>`;
+    <p class="hint">${t("help")}</p>` + optionsHtml();
+  bindOptions();
   const upd = patch => { const l = layoutOf(c); draft[c.handle] = { dx: l.dx, dy: l.dy, ...patch }; render(); renderPanel(); };
   panel.querySelector("#client").onchange = e => { selected = Number(e.target.value); render(); renderPanel(); };
   for (const a of ["dx", "dy"]) { const i = panel.querySelector("#" + a); i.onchange = () => upd({ [a]: Math.round(Number(i.value) || 0) }); }
@@ -249,29 +305,54 @@ function renderPanel() {
 
 async function save(c) {
   const lay = layoutOf(c);
-  if (overlaps(c, lay)) { setMsg("No se guardó: los monitores se superponen.", "bad"); return; }
-  if (!contacts(c, lay).length) { setMsg("No se guardó: los monitores no se tocan.", "bad"); return; }
+  if (overlaps(c, lay)) { setMsg(t("notSavedOverlap"), "bad"); return; }
+  if (!contacts(c, lay).length) { setMsg(t("notSavedTouch"), "bad"); return; }
   try {
     await api("/api/layout", { method: "POST", body: JSON.stringify({ handle: c.handle, layout: { dx: lay.dx, dy: lay.dy } }) });
-    delete draft[c.handle]; setMsg("Guardado ✓ (también en la otra máquina)", "ok"); await refresh();
-  } catch (e) { setMsg("Error: " + e.message, "bad"); }
+    delete draft[c.handle]; setMsg(t("saved"), "ok"); await refresh();
+  } catch (e) { setMsg(t("error") + e.message, "bad"); }
 }
 async function clearLayout(c) {
   try {
     await api("/api/layout", { method: "POST", body: JSON.stringify({ handle: c.handle, layout: null }) });
-    delete draft[c.handle]; setMsg("Layout quitado: se usa el borde de todo el escritorio.", "ok"); await refresh();
-  } catch (e) { setMsg("Error: " + e.message, "bad"); }
+    delete draft[c.handle]; setMsg(t("cleared"), "ok"); await refresh();
+  } catch (e) { setMsg(t("error") + e.message, "bad"); }
+}
+
+// ---------- options ----------
+function optionsHtml() {
+  const st = (snap && snap.settings) || { language: lang, clipboard: true, invert_scroll: false };
+  return `<hr><h2>${t("options")}</h2>
+    <label>${t("language")}
+      <select id="opt-lang"><option value="es" ${st.language === "es" ? "selected" : ""}>Español</option><option value="en" ${st.language === "en" ? "selected" : ""}>English</option></select>
+    </label>
+    <label class="check"><input type="checkbox" id="opt-clip" ${st.clipboard ? "checked" : ""}> ${t("clipboard")}</label>
+    <label class="check"><input type="checkbox" id="opt-scroll" ${st.invert_scroll ? "checked" : ""}> ${t("invertScroll")}</label>`;
+}
+function bindOptions() {
+  const l = panel.querySelector("#opt-lang"), c = panel.querySelector("#opt-clip"), sc = panel.querySelector("#opt-scroll");
+  if (!l || !c || !sc) return;
+  const save = async () => {
+    try {
+      await api("/api/settings", { method: "POST", body: JSON.stringify({ language: l.value, clipboard: c.checked, invert_scroll: sc.checked }) });
+      lang = l.value; applyStatic(); setMsg(t("optionsSaved"), "ok"); await refresh();
+    } catch (e) { setMsg(t("error") + e.message, "bad"); }
+  };
+  l.onchange = save; c.onchange = save; sc.onchange = save;
 }
 
 // ---------- polling ----------
 async function refresh() {
   try {
     snap = await api("/api/state");
-    statusEl.textContent = snap.connected ? `daemon conectado · ${snap.local.length} monitor(es) locales · ${snap.clients.length} cliente(s)` : "daemon desconectado";
+    if (snap.settings && snap.settings.language !== lang) { lang = snap.settings.language; applyStatic(); }
+    statusEl.textContent = snap.connected ? t("status", snap.local.length, snap.clients.length) : t("disconnected");
   } catch (e) { statusEl.textContent = e.message; return; }
-  if (!drag) { render(); if (!panel.contains(document.activeElement) || document.activeElement.tagName === "BUTTON") renderPanel(); }
+  if (!drag) { render(); if (!panel.contains(document.activeElement) || ["BUTTON"].includes(document.activeElement.tagName)) renderPanel(); }
 }
 window.addEventListener("resize", () => { if (!drag) render(); });
+applyStatic();
+statusEl.textContent = t("connecting");
 refresh();
 setInterval(refresh, 1500);
 </script>

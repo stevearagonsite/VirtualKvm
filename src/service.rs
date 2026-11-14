@@ -117,6 +117,7 @@ impl Service {
         );
         let emulation_backend = config.emulation_backend().map(|b| b.into());
         let emulation = Emulation::new(emulation_backend, listener);
+        emulation.set_invert_scroll(config.invert_scroll());
 
         // create dns resolver
         let resolver = DnsResolver::new()?;
@@ -216,6 +217,20 @@ impl Service {
             FrontendRequest::TakeAgentMessages => {
                 let messages = self.agent_inbox.drain(..).collect();
                 self.notify_frontend(FrontendEvent::AgentMessages(messages));
+            }
+            FrontendRequest::GetSettings => self.notify_settings(),
+            FrontendRequest::UpdateSettings(s) => {
+                let language = if s.language == "en" { "en" } else { "es" };
+                log::info!(
+                    "settings: language={language} clipboard={} invert_scroll={}",
+                    s.clipboard,
+                    s.invert_scroll
+                );
+                self.config
+                    .set_settings(language, s.clipboard, s.invert_scroll);
+                self.emulation.set_invert_scroll(s.invert_scroll);
+                self.save_config();
+                self.notify_settings();
             }
             FrontendRequest::GetAgentPeers => {
                 let peers = self
@@ -696,6 +711,15 @@ impl Service {
             }
             kind => log::debug!("ignoring message of kind {kind} from {from:?}"),
         }
+    }
+
+    fn notify_settings(&mut self) {
+        let settings = lan_mouse_ipc::Settings {
+            language: self.config.language(),
+            clipboard: self.config.clipboard_sharing(),
+            invert_scroll: self.config.invert_scroll(),
+        };
+        self.notify_frontend(FrontendEvent::Settings(settings));
     }
 
     /// (VirtualKvm) relay a text message to the AI agent on a peer

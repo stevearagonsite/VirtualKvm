@@ -22,6 +22,7 @@ pub(crate) struct Emulation {
     task: JoinHandle<()>,
     request_tx: Sender<EmulationRequest>,
     event_rx: Receiver<EmulationEvent>,
+    invert_scroll: Rc<Cell<bool>>,
 }
 
 pub(crate) enum EmulationEvent {
@@ -106,18 +107,27 @@ impl Emulation {
         let emulation_proxy = EmulationProxy::new(backend);
         let (request_tx, request_rx) = channel();
         let (event_tx, event_rx) = channel();
+        let invert_scroll = Rc::new(Cell::new(false));
         let emulation_task = ListenTask {
             listener,
             emulation_proxy,
             request_rx,
             event_tx,
+            invert_scroll: invert_scroll.clone(),
         };
         let task = spawn_local(emulation_task.run());
         Self {
             task,
             request_tx,
             event_rx,
+            invert_scroll,
         }
+    }
+
+    /// (VirtualKvm) reverse the scroll direction of input coming from peers
+    /// (e.g. to match LinearMouse settings for physical mice on macOS)
+    pub(crate) fn set_invert_scroll(&self, invert: bool) {
+        self.invert_scroll.set(invert);
     }
 
     pub(crate) fn send_leave_event(&self, addr: SocketAddr) {
@@ -173,6 +183,8 @@ struct ListenTask {
     emulation_proxy: EmulationProxy,
     request_rx: Receiver<EmulationRequest>,
     event_tx: Sender<EmulationEvent>,
+    /// (VirtualKvm) reverse the scroll direction of remote input
+    invert_scroll: Rc<Cell<bool>>,
 }
 
 impl ListenTask {
@@ -209,7 +221,10 @@ impl ListenTask {
                                 self.emulation_proxy.remove(addr);
                                 self.listener.reply(addr, ProtoEvent::Ack(0)).await;
                             }
-                            ProtoEvent::Input(event) => self.emulation_proxy.consume(event, addr),
+                            ProtoEvent::Input(event) => {
+                                let event = if self.invert_scroll.get() { invert_scroll(event) } else { event };
+                                self.emulation_proxy.consume(event, addr)
+                            }
                             ProtoEvent::Ping => self.listener.reply(addr, ProtoEvent::Pong(self.emulation_proxy.emulation_active.get())).await,
                             // Peer's version handshake. Echo our own
                             // commit back so the peer's connect-side
@@ -543,5 +558,26 @@ impl<T> Drop for DropGuard<T> {
         self.tx
             .send(self.on_drop.take().expect("item"))
             .expect("channel closed");
+    }
+}
+
+/// (VirtualKvm) the same scroll event in the opposite direction
+fn invert_scroll(event: Event) -> Event {
+    use input_event::PointerEvent;
+    match event {
+        Event::Pointer(PointerEvent::Axis { time, axis, value }) => {
+            Event::Pointer(PointerEvent::Axis {
+                time,
+                axis,
+                value: -value,
+            })
+        }
+        Event::Pointer(PointerEvent::AxisDiscrete120 { axis, value }) => {
+            Event::Pointer(PointerEvent::AxisDiscrete120 {
+                axis,
+                value: -value,
+            })
+        }
+        e => e,
     }
 }

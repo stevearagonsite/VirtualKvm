@@ -21,7 +21,7 @@ use axum::{
 use futures::StreamExt;
 use lan_mouse_ipc::{
     ClientConfig, ClientHandle, ClientState, ConnectionError, DisplayInfo, DisplayLayout,
-    FrontendEvent, FrontendRequest, IpcError, connect_async,
+    FrontendEvent, FrontendRequest, IpcError, Settings, connect_async,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,7 @@ struct Snapshot {
     clients: Vec<ClientView>,
     fingerprint: Option<String>,
     connected: bool,
+    settings: Option<Settings>,
 }
 
 impl Snapshot {
@@ -100,6 +101,7 @@ impl Snapshot {
             FrontendEvent::Deleted(h) => self.clients.retain(|c| c.handle != h),
             FrontendEvent::Displays(displays) => self.local = displays,
             FrontendEvent::PublicKeyFingerprint(fp) => self.fingerprint = Some(fp),
+            FrontendEvent::Settings(s) => self.settings = Some(s),
             _ => {}
         }
     }
@@ -182,6 +184,7 @@ pub async fn run(args: WebArgs) -> Result<(), WebError> {
         FrontendRequest::Sync,
         FrontendRequest::Enumerate(),
         FrontendRequest::GetDisplays,
+        FrontendRequest::GetSettings,
     ] {
         let _ = requests.send(r);
     }
@@ -203,6 +206,7 @@ pub async fn run(args: WebArgs) -> Result<(), WebError> {
         .route("/", get(index))
         .route("/api/state", get(get_state))
         .route("/api/layout", post(set_layout))
+        .route("/api/settings", post(set_settings))
         .with_state(state);
 
     let listener = TcpListener::bind(("127.0.0.1", args.port)).await?;
@@ -263,6 +267,18 @@ async fn set_layout(
     }
     app.request(FrontendRequest::UpdateLayout(req.handle, req.layout));
     app.request(FrontendRequest::Enumerate());
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn set_settings(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Json(settings): Json<Settings>,
+) -> Response {
+    if let Err(code) = app.check(&headers) {
+        return code.into_response();
+    }
+    app.request(FrontendRequest::UpdateSettings(settings));
     StatusCode::NO_CONTENT.into_response()
 }
 

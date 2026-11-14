@@ -108,6 +108,10 @@ struct ConfigToml {
     authorized_fingerprints: Option<HashMap<String, String>>,
     /// (VirtualKvm) share the text clipboard with the peers (default: true)
     clipboard: Option<bool>,
+    /// (VirtualKvm) user interface language: "es" or "en" (default: "es")
+    language: Option<String>,
+    /// (VirtualKvm) reverse the scroll direction of input coming from peers (default: false)
+    invert_scroll: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -544,6 +548,31 @@ impl Config {
     }
 
     /// release bind for returning control to the host
+    /// (VirtualKvm) user interface language ("es" / "en")
+    pub fn language(&self) -> String {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.language.clone())
+            .filter(|l| l == "es" || l == "en")
+            .unwrap_or_else(|| "es".into())
+    }
+
+    /// (VirtualKvm) update the user settings (written by `write_back`)
+    pub fn set_settings(&mut self, language: &str, clipboard: bool, invert_scroll: bool) {
+        let c = self.config_toml.get_or_insert_with(Default::default);
+        c.language = Some(language.to_owned());
+        c.clipboard = Some(clipboard);
+        c.invert_scroll = Some(invert_scroll);
+    }
+
+    /// (VirtualKvm) reverse the scroll direction of input coming from peers
+    pub fn invert_scroll(&self) -> bool {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.invert_scroll)
+            .unwrap_or(false)
+    }
+
     /// (VirtualKvm) whether the text clipboard is shared with the peers
     pub fn clipboard_sharing(&self) -> bool {
         self.config_toml

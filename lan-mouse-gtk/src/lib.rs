@@ -324,7 +324,8 @@ fn build_ui(app: &Application) {
                     FrontendEvent::Displays(_)
                     | FrontendEvent::AgentMessages(_)
                     | FrontendEvent::AgentMessageSent { .. }
-                    | FrontendEvent::AgentPeers(_) => {}
+                    | FrontendEvent::AgentPeers(_)
+                    | FrontendEvent::Settings(_) => {}
                     FrontendEvent::IncomingDisconnected(addr) => {
                         window.show_toast(format!("{addr} disconnected").as_str());
                     }

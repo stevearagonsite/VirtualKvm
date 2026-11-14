@@ -165,6 +165,18 @@ pub struct AgentMessage {
     pub received_at: u64,
 }
 
+/// (VirtualKvm) user settings shown in the UI
+#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+pub struct Settings {
+    /// "es" or "en"
+    pub language: String,
+    /// share the text clipboard with the peers
+    pub clipboard: bool,
+    /// reverse the scroll direction of input coming from peers
+    #[serde(default)]
+    pub invert_scroll: bool,
+}
+
 /// (VirtualKvm) a peer as seen by the agent channel
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub struct AgentPeer {
@@ -288,6 +300,8 @@ pub enum FrontendEvent {
     },
     /// (VirtualKvm) peers reachable by the agent channel
     AgentPeers(Vec<AgentPeer>),
+    /// (VirtualKvm) current user settings
+    Settings(Settings),
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -338,6 +352,10 @@ pub enum FrontendRequest {
     TakeAgentMessages,
     /// (VirtualKvm) list the peers of the agent channel
     GetAgentPeers,
+    /// (VirtualKvm) request [`FrontendEvent::Settings`]
+    GetSettings,
+    /// (VirtualKvm) change the user settings
+    UpdateSettings(Settings),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]

@@ -270,29 +270,81 @@ mod imp {
         Icon::from_rgba(icon::rgba(on, ICON_SIZE, STYLE), ICON_SIZE, ICON_SIZE).expect("icon")
     }
 
+    /// user interface language from the shared config (`language = "en"`)
+    fn language() -> &'static str {
+        let config = fs::read_to_string(config_dir().join("config.toml")).unwrap_or_default();
+        let english = config.lines().any(|l| {
+            let l = l.replace(' ', "");
+            l == "language=\"en\"" || l == "language='en'"
+        });
+        if english { "en" } else { "es" }
+    }
+
+    struct Texts {
+        external: &'static str,
+        sharing: &'static str,
+        starting: &'static str,
+        off: &'static str,
+        turn_off: &'static str,
+        turn_on: &'static str,
+        displays: &'static str,
+        quit: &'static str,
+    }
+
+    fn texts(lang: &str) -> Texts {
+        match lang {
+            "en" => Texts {
+                external: "VirtualKvm is already running outside the tray",
+                sharing: "Sharing mouse and keyboard",
+                starting: "Starting…",
+                off: "Off",
+                turn_off: "Turn off",
+                turn_on: "Turn on",
+                displays: "Displays & options…",
+                quit: "Quit",
+            },
+            _ => Texts {
+                external: "VirtualKvm ya corre fuera de la bandeja",
+                sharing: "Compartiendo mouse y teclado",
+                starting: "Iniciando…",
+                off: "Apagado",
+                turn_off: "Apagar",
+                turn_on: "Prender",
+                displays: "Monitores y opciones…",
+                quit: "Salir",
+            },
+        }
+    }
+
     struct Ui {
         tray: TrayIcon,
         status: MenuItem,
         toggle: MenuItem,
-        shown: Option<bool>,
+        monitors: MenuItem,
+        quit: MenuItem,
+        shown: Option<(bool, &'static str)>,
     }
 
     impl Ui {
         fn show(&mut self, running: bool, wanted: bool, external: bool) {
-            let key = Some(running);
+            let lang = language();
+            let t = texts(lang);
+            let key = Some((running, lang));
             let label = if external {
-                "VirtualKvm ya corre fuera de la bandeja"
+                t.external
             } else if running {
-                "Compartiendo mouse y teclado"
+                t.sharing
             } else if wanted {
-                "Iniciando…"
+                t.starting
             } else {
-                "Apagado"
+                t.off
             };
             self.status.set_text(label);
             self.toggle
-                .set_text(if wanted { "Apagar" } else { "Prender" });
+                .set_text(if wanted { t.turn_off } else { t.turn_on });
             self.toggle.set_enabled(!external);
+            self.monitors.set_text(t.displays);
+            self.quit.set_text(t.quit);
             if self.shown != key {
                 #[cfg(target_os = "macos")]
                 let _ = self.tray.set_icon_templated(Some(make_icon(running)));
@@ -363,6 +415,8 @@ mod imp {
                                 tray,
                                 status: status.clone(),
                                 toggle: toggle.clone(),
+                                monitors: monitors.clone(),
+                                quit: quit.clone(),
                                 shown: None,
                             })
                         }
