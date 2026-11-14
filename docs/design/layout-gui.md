@@ -1,6 +1,6 @@
 # Diseño: layout por monitor + interfaz gráfica
 
-> Estado: en implementación (branch `feat/layout-gui`) · Fase 3 de `PLAN.md`.
+> Estado: implementado (branch `feat/layout-gui`, PR #4) · Fase 3 de `PLAN.md`. Binario: `vkvm`.
 
 ## Problema
 
@@ -22,38 +22,46 @@ Lan Mouse hoy:
 3. Al volver pasa lo mismo: el cursor reaparece en la Mac donde se fue, no a la altura por la que salió de la Windows.
 4. No hay UI para ubicar los monitores.
 
-## Modelo: un "link" por cliente
+## Modelo (v2): un escritorio virtual compartido
 
-Cada cliente puede tener un **link**: un monitor local, un monitor remoto, el lado donde está el remoto
-y un **offset**, que es dónde arranca el remoto a lo largo de ese borde, en píxeles lógicos locales.
+> v1 era "un borde + offset por cliente". No alcanzaba: en el setup de Steve el monitor
+> de la Windows toca **dos** bordes (el izquierdo del LF27T35 y el de arriba de la laptop).
+
+Cada cliente tiene un **layout**: dónde están los monitores del peer en nuestro escritorio,
+como una traslación. Un punto `(x, y)` del peer aparece en `(x + dx, y + dy)` del nuestro.
 
 ```toml
 [[clients]]
-position = "left"
 ips = ["192.168.0.210"]
 activate_on_startup = true
 
-[clients.link]
-local_display = "LF27T35"     # nombre o id del monitor local
-remote_display = 0            # índice del monitor remoto (lo informa el peer)
-offset = 0                    # top del remoto - top del local (en px lógicos locales)
+[clients.layout]   # Mac: la Windows arriba a la izquierda
+dx = -993
+dy = -1080
 ```
 
-Sin `link`, el comportamiento es el de Lan Mouse (borde del escritorio completo). Es retrocompatible.
+- **Bordes activos:** todos los tramos donde un monitor del peer toca uno nuestro (±2 px).
+  La captura recibe un `Segment` por tramo, cada uno con su lado.
+- **Entrada:** el punto del cruce, trasladado al peer (`EnterAt`), 1 px adentro del borde por el que entra.
+- **Vuelta:** el peer manda dónde salió (`LeaveAt`). Se traslada y se ubica en el monitor local más cercano.
+- **`position`** (la del upstream) se deriva sola: el lado del contacto más largo.
+- **Compartido:** al guardar en una máquina se envía `LayoutSync { dx, dy }` y la otra guarda
+  el espejo (`-dx, -dy`). Las dos UIs muestran lo mismo.
+- **Monitores del peer:** se intercambian (`DisplayInfo`) al conectar. El daemon sondea cada 5 s a los
+  clientes activos cuyos monitores no conoce, así el layout funciona antes del primer cruce.
+- **IP cambiada (DHCP):** si un peer autorizado llega desde una IP desconocida y hay un solo cliente,
+  se lo asocia y se suma la IP a la config (hasta que exista discovery por mDNS).
 
-### Geometría
-- Tramo activo del borde: la intersección entre el borde del monitor local y el remoto ubicado con `offset`.
-  Fuera de ese tramo, el cursor se frena como en un borde normal.
-- Al cruzar en (x_l, y_l), el punto de entrada remoto es
-  `y_r = remote.y + (y_l - (local.y + offset)) * remote.h / remote.h_logico`. La x es el borde opuesto
-  del remoto (1 px adentro). Para `top`/`bottom` es lo mismo con los ejes intercambiados.
-- Al volver, el peer manda su punto de salida y la Mac hace la cuenta inversa para ubicar el cursor.
+Limitaciones actuales:
+- En Windows la captura todavía no soporta tramos: la vuelta Windows → Mac usa el borde completo de
+  `position`. En el setup de Steve funciona por el borde derecho de la Windows, no por el de abajo.
+- Los monitores del peer se ven como "Monitor N" (el nombre no viaja en `DisplayInfo`).
 
 ## Cambios por capa
 
 | Capa | Cambio |
 |---|---|
-| `lan-mouse-proto` | Eventos nuevos (21 bytes máx.): `EnterAt{pos, x, y}`, `LeaveAt{x, y}`, `DisplayInfo{idx, count, x, y, w, h, scale%}`. Los peers viejos los ignoran (forward-compat ya existente) |
+| `lan-mouse-proto` | Eventos nuevos (21 bytes máx.): `EnterAt{pos, x, y}`, `LeaveAt{x, y}`, `DisplayInfo{idx, count, x, y, w, h, scale%}`, `LayoutSync{present, dx, dy}`. Los peers viejos los ignoran (forward-compat ya existente) |
 | `input-capture` | `CaptureEvent::BeginAt{x, y}` con el punto de cruce. En macOS: barrera limitada a un monitor y un tramo (`create_with_segment`). En Windows (después): lo mismo |
 | `input-emulation` | `Emulation::warp(x, y)` con no-op por defecto. Windows: `SetCursorPos`. macOS: `CGWarpMouseCursorPosition` |
 | `vkvm-displays` (crate nuevo) | Enumeración de monitores: macOS (CoreGraphics) y Windows (`EnumDisplayMonitors` + `GetDpiForMonitor`) |
