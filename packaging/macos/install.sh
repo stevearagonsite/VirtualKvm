@@ -75,7 +75,7 @@ plutil -lint "$PLIST" >/dev/null
 launchctl bootstrap "$DOMAIN" "$PLIST"
 sleep 3
 
-echo "VirtualKvm $("$BIN" --version 2>/dev/null | head -1 | awk '{print $2}') instalado: el ícono arranca solo al iniciar sesión."
+echo "VirtualKvm $("$BIN" -V 2>/dev/null | head -1 | awk '{print $2}') instalado: el ícono arranca solo al iniciar sesión."
 echo "Logs: $LOGDIR"
 if [[ "$NEW_TRAY" == 1 ]] || tail -20 "$LOGDIR/daemon.log" 2>/dev/null | grep -q "permission is required"; then
   echo

@@ -182,7 +182,7 @@ Crates candidatos para lo nuevo (versiones al 12-nov-2026): `evdev` 0.13, `mdns-
 | **2. Red** | `vkvm-discovery` (mDNS), `vkvm-wol`, filtros LAN-only | Cambiar la IP de la Windows no rompe nada. Despertarla desde la Mac |
 | **3. UI web + monitores** ✅ | `vkvm-displays`, `vkvm-web`, editor de layout, elegir el servidor desde la UI | Reordenar monitores en la UI cambia los bordes en vivo. Usar la Mac desde la Windows |
 | **4. Linux** | Backend uinput (PR upstream), Ubuntu Desktop (libei existente), Ubuntu Server (TTY, systemd), `vkvm-tui` | Escribir en la consola del server desde la Mac |
-| **5. Pulido** | Portapapeles de texto, servicio de Windows para login/UAC con IPC autenticada, firma y notarización en macOS, releases | Instaladores en GitHub Releases |
+| **5. Pulido** (instalables publicados en install.stevearagonsite.com ✅) | Portapapeles de texto, servicio de Windows para login/UAC con IPC autenticada, firma y notarización en macOS, releases | Instaladores en GitHub Releases |
 | Futuro | KVM real: video y escritorio remoto | — |
 
 CI: el upstream ya trae GitHub Actions (`rust.yml`, releases). Se mantienen y se agregan los crates nuevos. La lógica nueva (layout, bordes, filtros de IP, WoL) va en código puro con tests; los backends de SO quedan finos.

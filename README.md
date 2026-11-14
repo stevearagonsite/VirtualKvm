@@ -25,7 +25,23 @@ sus monitores formaran un solo escritorio. Es un "KVM por software", pensado par
 Plataformas probadas: **macOS** (Apple Silicon) y **Windows 11**. Linux mantiene el soporte de Lan Mouse
 (Wayland/X11); las funciones nuevas todavía no están probadas ahí. Hoja de ruta: [PLAN.md](PLAN.md).
 
-## Instalar (desde el código)
+## Instalar
+
+Descargas y versiones: **[install.stevearagonsite.com/virtualkvm](https://install.stevearagonsite.com/virtualkvm/)** (por ahora macOS
+Apple Silicon y Windows x64).
+
+```sh
+# macOS (Terminal)
+curl -fsSL https://install.stevearagonsite.com/virtualkvm/install.sh | bash
+```
+```powershell
+# Windows (PowerShell como Administrador)
+irm https://install.stevearagonsite.com/virtualkvm/install.ps1 | iex
+```
+
+Los instaladores bajan la última versión, verifican el SHA-256 e instalan el ícono, que arranca al iniciar sesión.
+
+### Desde el código
 
 Requiere Rust estable. En Windows, además, Visual Studio Build Tools con C++.
 
@@ -63,6 +79,7 @@ de su config: `~/.config/virtualkvm/config.toml` en macOS o `%LOCALAPPDATA%\virt
 - [docs/design/layout-gui.md](docs/design/layout-gui.md): layout compartido, protocolo y UI.
 - [docs/design/safety.md](docs/design/safety.md): no perder nunca el control de una máquina.
 - [docs/guia-claude-code.md](docs/guia-claude-code.md): conectar Claude Code entre máquinas.
+- [docs/release.md](docs/release.md): cómo se publican los instalables.
 - [docs/lan-mouse/README.md](docs/lan-mouse/README.md): **README original de Lan Mouse** (backends, compilación en
   cada sistema, configuración avanzada).
 

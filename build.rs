@@ -6,6 +6,11 @@ fn main() {
         .build()
         .expect("shadow build");
 
+    // (VirtualKvm) product version, independent of the Lan Mouse package version
+    println!("cargo::rerun-if-changed=VERSION");
+    let vkvm_version = std::fs::read_to_string("VERSION").unwrap_or_default();
+    println!("cargo::rustc-env=VKVM_VERSION={}", vkvm_version.trim());
+
     let unix = cfg!(unix);
     let macos = cfg!(target_os = "macos");
 

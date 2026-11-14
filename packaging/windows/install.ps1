@@ -76,7 +76,7 @@ Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -Princi
 Start-ScheduledTask -TaskName $task
 Start-Sleep -Seconds 3
 
-$version = (& $exe --version 2>$null | Select-Object -First 1)
-"VirtualKvm instalado ($version): el icono arranca solo al iniciar sesion de $User."
+$version = ((& $exe -V 2>$null | Select-Object -First 1) -split ' ')[1]
+"VirtualKvm $version instalado: el icono arranca solo al iniciar sesion de $User."
 "La red tiene que estar como 'Privada' para que el firewall deje pasar a las otras PCs de la LAN."
 "Logs: $base"

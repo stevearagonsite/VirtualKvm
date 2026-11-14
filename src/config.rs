@@ -141,7 +141,13 @@ impl ConfigToml {
 #[command(
     name = "vkvm",
     author,
-    version = build::CLAP_LONG_VERSION,
+    version = concat!(
+        env!("VKVM_VERSION"),
+        " (VirtualKvm, based on Lan Mouse ",
+        env!("CARGO_PKG_VERSION"),
+        ")"
+    ),
+    long_version = build::CLAP_LONG_VERSION,
     about = "VirtualKvm: share one mouse and keyboard across the computers of your LAN.\nBased on Lan Mouse (https://github.com/feschber/lan-mouse), GPL-3.0-or-later.",
     long_about = None
 )]
