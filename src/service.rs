@@ -354,7 +354,7 @@ impl Service {
             } => {
                 log::info!("{addr} display {index}/{count}: {display:?}");
                 // also for inactive clients: the layout UI needs the peer's displays
-                if let Some(handle) = self.client_manager.get_client_by_ip(addr.ip()) {
+                if let Some(handle) = self.peer_client(addr) {
                     self.client_manager
                         .set_remote_display(handle, index, count, display);
                     if index + 1 == count {
@@ -367,7 +367,7 @@ impl Service {
                 }
             }
             EmulationEvent::PeerLayout { addr, layout } => {
-                let Some(handle) = self.client_manager.get_client_by_ip(addr.ip()) else {
+                let Some(handle) = self.peer_client(addr) else {
                     log::warn!("{addr} sent a layout, but it is not a configured client");
                     return;
                 };
@@ -550,6 +550,26 @@ impl Service {
         } else {
             self.deactivate_client(handle);
         }
+    }
+
+    /// (VirtualKvm) client of an authorized incoming peer. Peers are matched by
+    /// ip; if the ip is unknown (DHCP gave the peer a new one) and there is only
+    /// one client, that is the peer: its new ip is added to the client's config.
+    fn peer_client(&mut self, addr: std::net::SocketAddr) -> Option<ClientHandle> {
+        if let Some(handle) = self.client_manager.get_client_by_ip(addr.ip()) {
+            return Some(handle);
+        }
+        let clients = self.client_manager.get_client_states();
+        let [(handle, config, _)] = clients.as_slice() else {
+            log::warn!("{addr}: unknown peer ip and several clients configured");
+            return None;
+        };
+        log::info!("client ({handle}): peer seen at new ip {}, adding it", addr.ip());
+        let mut ips = config.fix_ips.clone();
+        ips.push(addr.ip());
+        self.update_fix_ips(*handle, ips);
+        self.save_config();
+        Some(*handle)
     }
 
     /// (VirtualKvm) store a display layout and re-apply it. The client position
