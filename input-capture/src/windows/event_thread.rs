@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ptr::addr_of_mut;
 
 use std::default::Default;
@@ -32,6 +32,7 @@ use input_event::{
 };
 
 use super::{CaptureEvent, Position, display_util};
+use crate::Segment;
 
 pub(crate) struct EventThread {
     request_buffer: Arc<Mutex<Vec<ClientUpdate>>>,
@@ -60,6 +61,11 @@ impl EventThread {
 
     pub(crate) fn destroy(&self, pos: Position) {
         self.client_update(ClientUpdate::Destroy(pos));
+    }
+
+    /// (VirtualKvm) restrict the barrier at `pos` to display segments
+    pub(crate) fn set_segments(&self, pos: Position, segments: Option<Vec<Segment>>) {
+        self.client_update(ClientUpdate::Segments(pos, segments));
     }
 
     fn exit(&self) {
@@ -96,6 +102,8 @@ enum RequestType {
 enum ClientUpdate {
     Create(Position),
     Destroy(Position),
+    /// (VirtualKvm) barrier segments of a position (None = whole desktop edge)
+    Segments(Position, Option<Vec<Segment>>),
 }
 
 fn blocking_send_event(pos: Position, event: CaptureEvent) {
@@ -122,6 +130,8 @@ thread_local! {
     static PREV_POS: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
     /// displays and generation counter
     static DISPLAYS: RefCell<(Vec<RECT>, i32)> = const { RefCell::new((Vec::new(), 0)) };
+    /// (VirtualKvm) barriers restricted to display segments
+    static SEGMENTS: RefCell<HashMap<Position, Vec<Segment>>> = RefCell::new(HashMap::new());
 }
 
 fn get_msg() -> Option<MSG> {
@@ -274,11 +284,35 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
         return ret;
     }
 
-    /* check if a client was activated */
-    let entered = DISPLAYS.with_borrow_mut(|(displays, generation)| {
-        update_display_regions(displays, generation);
-        display_util::entered_barrier(prev_pos, curr_pos, displays)
+    /* (VirtualKvm) segment barriers first: they carry their own side */
+    let (px, py) = (prev_pos.0 as f64, prev_pos.1 as f64);
+    let (dx, dy) = (
+        (curr_pos.0 - prev_pos.0) as f64,
+        (curr_pos.1 - prev_pos.1) as f64,
+    );
+    let segment_hit = SEGMENTS.with_borrow(|segments| {
+        CLIENTS.with_borrow(|clients| {
+            clients.iter().find_map(|pos| {
+                segments
+                    .get(pos)?
+                    .iter()
+                    .find(|s| s.crossed(px, py, dx, dy))
+                    .map(|s| (*pos, s.side))
+            })
+        })
     });
+
+    /* check if a client was activated */
+    let entered = match segment_hit {
+        Some((pos, _)) => Some(pos),
+        None => DISPLAYS
+            .with_borrow_mut(|(displays, generation)| {
+                update_display_regions(displays, generation);
+                display_util::entered_barrier(prev_pos, curr_pos, displays)
+            })
+            // positions with segments only cross through their segments
+            .filter(|pos| !SEGMENTS.with_borrow(|s| s.contains_key(pos))),
+    };
 
     let Some(pos) = entered else {
         return ret;
@@ -299,7 +333,11 @@ fn check_client_activation(wparam: WPARAM, lparam: LPARAM) -> bool {
     /* notify main thread */
     log::debug!("ENTERED @ {prev_pos:?} -> {curr_pos:?}");
     let active = ACTIVE_CLIENT.get().expect("active client");
-    blocking_send_event(active, CaptureEvent::Begin);
+    let begin = match segment_hit {
+        Some((_, side)) => CaptureEvent::BeginAt { x: px, y: py, side },
+        None => CaptureEvent::Begin,
+    };
+    blocking_send_event(active, begin);
 
     ret
 }
@@ -430,6 +468,18 @@ fn update_clients(request: ClientUpdate) {
                 }
             }
             CLIENTS.with_borrow_mut(|clients| clients.remove(&pos));
+            SEGMENTS.with_borrow_mut(|segments| segments.remove(&pos));
+        }
+        ClientUpdate::Segments(pos, segments) => {
+            log::debug!("segments {pos}: {segments:?}");
+            SEGMENTS.with_borrow_mut(|s| match segments {
+                Some(v) => {
+                    s.insert(pos, v);
+                }
+                None => {
+                    s.remove(&pos);
+                }
+            });
         }
     }
 }

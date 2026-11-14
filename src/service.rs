@@ -463,6 +463,10 @@ impl Service {
         let handle = Self::ENTER_HANDLE_BEGIN + self.next_trigger_handle;
         self.next_trigger_handle += 1;
         self.capture.create(handle, pos, CaptureType::EnterOnly);
+        // (VirtualKvm) the return barrier follows our layout for this peer
+        if let Some(client) = self.peer_client(addr) {
+            self.capture.set_layout_source(handle, client);
+        }
         self.incoming_conns.insert(addr);
         self.incoming_conn_info.insert(
             handle,
@@ -564,7 +568,10 @@ impl Service {
             log::warn!("{addr}: unknown peer ip and several clients configured");
             return None;
         };
-        log::info!("client ({handle}): peer seen at new ip {}, adding it", addr.ip());
+        log::info!(
+            "client ({handle}): peer seen at new ip {}, adding it",
+            addr.ip()
+        );
         let mut ips = config.fix_ips.clone();
         ips.push(addr.ip());
         self.update_fix_ips(*handle, ips);

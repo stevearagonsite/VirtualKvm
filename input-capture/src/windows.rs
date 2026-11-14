@@ -37,6 +37,10 @@ impl Capture for WindowsInputCapture {
     async fn terminate(&mut self) -> Result<(), CaptureError> {
         Ok(())
     }
+
+    fn set_segments(&mut self, pos: Position, segments: Option<Vec<crate::Segment>>) {
+        self.event_thread.set_segments(pos, segments);
+    }
 }
 
 impl WindowsInputCapture {

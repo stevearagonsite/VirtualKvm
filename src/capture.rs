@@ -75,6 +75,8 @@ enum CaptureRequest {
     UpdateLayout(CaptureHandle),
     /// (VirtualKvm) send our layout for this client to the peer (mirrored there)
     SyncLayout(CaptureHandle),
+    /// (VirtualKvm) an incoming (enter-only) capture takes its segments from this client's layout
+    LayoutSource(CaptureHandle, lan_mouse_ipc::ClientHandle),
 }
 
 impl Capture {
@@ -96,6 +98,7 @@ impl Capture {
             pending_enter: None,
             crossing: None,
             pending_layout_sync: Default::default(),
+            layout_source: Default::default(),
             conn,
             event_tx,
             request_rx,
@@ -158,6 +161,18 @@ impl Capture {
         let _ = self.request_tx.send(CaptureRequest::UpdateLayout(handle));
     }
 
+    /// (VirtualKvm) the incoming capture `handle` belongs to the peer `client`:
+    /// its return barrier follows that client's layout
+    pub(crate) fn set_layout_source(
+        &self,
+        handle: CaptureHandle,
+        client: lan_mouse_ipc::ClientHandle,
+    ) {
+        let _ = self
+            .request_tx
+            .send(CaptureRequest::LayoutSource(handle, client));
+    }
+
     /// (VirtualKvm) tell the peer about our layout so it stores the mirrored one
     pub(crate) fn sync_layout(&self, handle: CaptureHandle) {
         let _ = self.request_tx.send(CaptureRequest::SyncLayout(handle));
@@ -194,6 +209,8 @@ struct CaptureTask {
     client_manager: ClientManager,
     /// (VirtualKvm) `Enter`/`EnterAt` to (re)send until the peer acknowledges
     pending_enter: Option<ProtoEvent>,
+    /// (VirtualKvm) incoming capture -> client whose layout it follows
+    layout_source: std::collections::HashMap<CaptureHandle, lan_mouse_ipc::ClientHandle>,
     /// (VirtualKvm) layouts not delivered to the peer yet (retried)
     pending_layout_sync: HashSet<CaptureHandle>,
     /// (VirtualKvm) local point where the barrier was crossed
@@ -212,6 +229,7 @@ impl CaptureTask {
 
     fn remove_capture(&mut self, handle: CaptureHandle) {
         self.captures.retain(|&(h, ..)| handle != h);
+        self.layout_source.remove(&handle);
     }
 
     fn is_default_capture_at(&self, pos: Position) -> bool {
@@ -241,14 +259,17 @@ impl CaptureTask {
     /// (VirtualKvm) barrier segments for a client (None = whole desktop edge).
     /// Without the peer's displays we can't know where they touch ours yet.
     fn segments(&self, handle: CaptureHandle) -> Option<Vec<Segment>> {
-        if !self
+        let capture_type = self
             .captures
             .iter()
-            .any(|&(h, _, t)| h == handle && t == CaptureType::Default)
-        {
-            return None;
-        }
-        let layout = self.layout(handle)?;
+            .find(|(h, ..)| *h == handle)
+            .map(|c| c.2)?;
+        let client = match capture_type {
+            CaptureType::Default => handle,
+            // the return barrier of an incoming connection
+            CaptureType::EnterOnly => *self.layout_source.get(&handle)?,
+        };
+        let layout = self.layout(client)?;
         if layout.remote.is_empty() {
             return None;
         }
@@ -276,7 +297,20 @@ impl CaptureTask {
     ) -> Result<(), CaptureError> {
         let segments = self.segments(handle);
         log::info!("client {handle}: barrier segments {segments:?}");
-        capture.set_segments(handle, segments).await
+        capture.set_segments(handle, segments).await?;
+        // incoming captures that follow this client's layout
+        let incoming: Vec<_> = self
+            .layout_source
+            .iter()
+            .filter(|&(_, &c)| c == handle)
+            .map(|(&h, _)| h)
+            .collect();
+        for h in incoming {
+            let segments = self.segments(h);
+            log::info!("incoming {h}: barrier segments {segments:?}");
+            capture.set_segments(h, segments).await?;
+        }
+        Ok(())
     }
 
     /// (VirtualKvm) send our layout to the peer (it stores the mirrored one).
@@ -349,6 +383,9 @@ impl CaptureTask {
                         }
                         CaptureRequest::UpdateLayout(_) => { /* applied when capture starts */ }
                         CaptureRequest::SyncLayout(h) => self.send_layout(h).await,
+                        CaptureRequest::LayoutSource(h, c) => {
+                            self.layout_source.insert(h, c);
+                        }
                     },
                     _ = probe.tick() => self.probe_peers().await,
                     _ = self.cancellation_token.cancelled() => return,
@@ -460,6 +497,12 @@ impl CaptureTask {
                     }
                     CaptureRequest::UpdateLayout(h) => self.apply_segments(capture, h).await?,
                     CaptureRequest::SyncLayout(h) => self.send_layout(h).await,
+                    CaptureRequest::LayoutSource(h, c) => {
+                        self.layout_source.insert(h, c);
+                        let segments = self.segments(h);
+                        log::info!("incoming {h}: barrier segments {segments:?}");
+                        capture.set_segments(h, segments).await?;
+                    }
                     CaptureRequest::Destroy(h) => {
                         // If the capture we're tearing down is the
                         // currently-active one, treat this as a
