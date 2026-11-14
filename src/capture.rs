@@ -1,5 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -94,6 +95,7 @@ impl Capture {
             client_manager,
             pending_enter: None,
             crossing: None,
+            pending_layout_sync: Default::default(),
             conn,
             event_tx,
             request_rx,
@@ -192,6 +194,8 @@ struct CaptureTask {
     client_manager: ClientManager,
     /// (VirtualKvm) `Enter`/`EnterAt` to (re)send until the peer acknowledges
     pending_enter: Option<ProtoEvent>,
+    /// (VirtualKvm) layouts not delivered to the peer yet (retried)
+    pending_layout_sync: HashSet<CaptureHandle>,
     /// (VirtualKvm) local point where the barrier was crossed
     crossing: Option<(f64, f64, Position)>,
     conn: LanMouseConnection,
@@ -275,8 +279,9 @@ impl CaptureTask {
         capture.set_segments(handle, segments).await
     }
 
-    /// (VirtualKvm) send our layout to the peer (it stores the mirrored one)
-    async fn send_layout(&self, handle: CaptureHandle) {
+    /// (VirtualKvm) send our layout to the peer (it stores the mirrored one).
+    /// If the connection is not up yet, it is retried later.
+    async fn send_layout(&mut self, handle: CaptureHandle) {
         let event = match self.client_manager.get_layout(handle) {
             Some(l) => ProtoEvent::LayoutSync {
                 present: true,
@@ -290,14 +295,27 @@ impl CaptureTask {
             },
         };
         log::info!("client {handle}: sending {event}");
-        if let Err(e) = self.conn.send(event, handle).await {
-            log::warn!("client {handle}: could not send layout: {e}");
+        match self.conn.send(event, handle).await {
+            Ok(()) => {
+                self.pending_layout_sync.remove(&handle);
+            }
+            Err(e) => {
+                log::info!("client {handle}: layout not sent yet ({e}), will retry");
+                self.pending_layout_sync.insert(handle);
+            }
+        }
+    }
+
+    async fn retry_layout_sync(&mut self) {
+        for handle in self.pending_layout_sync.clone() {
+            self.send_layout(handle).await;
         }
     }
 
     /// (VirtualKvm) connect to active clients whose displays we don't know yet,
     /// so the layout works (and the UI shows them) before the first crossing
-    async fn probe_peers(&self) {
+    async fn probe_peers(&mut self) {
+        self.retry_layout_sync().await;
         for (handle, _, state) in self.client_manager.get_client_states() {
             if state.active && state.remote_displays.is_empty() {
                 let _ = self.conn.send(ProtoEvent::Ping, handle).await;
@@ -397,6 +415,10 @@ impl CaptureTask {
                     if let ProtoEvent::DisplayInfo { index, count, .. } = event {
                         if index + 1 == count {
                             self.apply_segments(capture, handle).await?;
+                            // the connection is up: deliver a pending layout
+                            if self.pending_layout_sync.contains(&handle) {
+                                self.send_layout(handle).await;
+                            }
                         }
                         continue;
                     }
