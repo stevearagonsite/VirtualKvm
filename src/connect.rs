@@ -1,7 +1,8 @@
 use crate::client::ClientManager;
 use crate::config::local_commit;
+use crate::data::{DataIn, Peer};
 use lan_mouse_ipc::{ClientHandle, DEFAULT_PORT};
-use lan_mouse_proto::{MAX_EVENT_SIZE, ProtoEvent};
+use lan_mouse_proto::{Datagram, MAX_DATAGRAM, MAX_EVENT_SIZE, ProtoEvent};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use std::{
     cell::RefCell,
@@ -100,10 +101,16 @@ pub(crate) struct LanMouseConnection {
     recv_rx: Receiver<(ClientHandle, ProtoEvent)>,
     recv_tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    /// (VirtualKvm) data packets and acks for the service's data hub
+    data_tx: Sender<DataIn>,
 }
 
 impl LanMouseConnection {
-    pub(crate) fn new(cert: Certificate, client_manager: ClientManager) -> Self {
+    pub(crate) fn new(
+        cert: Certificate,
+        client_manager: ClientManager,
+        data_tx: Sender<DataIn>,
+    ) -> Self {
         let (recv_tx, recv_rx) = channel();
         Self {
             cert,
@@ -113,6 +120,7 @@ impl LanMouseConnection {
             recv_rx,
             recv_tx,
             ping_response: Default::default(),
+            data_tx,
         }
     }
 
@@ -126,14 +134,34 @@ impl LanMouseConnection {
         handle: ClientHandle,
     ) -> Result<(), LanMouseConnectionError> {
         let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = event.into();
-        let buf = &buf[..len];
+        self.send_bytes(&buf[..len], handle, true).await?;
+        log::trace!("{event} >->->->->- {handle}");
+        Ok(())
+    }
+
+    /// (VirtualKvm) send an encoded datagram (e.g. a data packet). Unlike input
+    /// events it does not need the peer's emulation to be enabled.
+    pub(crate) async fn send_raw(
+        &self,
+        buf: &[u8],
+        handle: ClientHandle,
+    ) -> Result<(), LanMouseConnectionError> {
+        self.send_bytes(buf, handle, false).await
+    }
+
+    async fn send_bytes(
+        &self,
+        buf: &[u8],
+        handle: ClientHandle,
+        needs_emulation: bool,
+    ) -> Result<(), LanMouseConnectionError> {
         if let Some(addr) = self.client_manager.active_addr(handle) {
             let conn = {
                 let conns = self.conns.lock().await;
                 conns.get(&addr).cloned()
             };
             if let Some(conn) = conn {
-                if !self.client_manager.alive(handle) {
+                if needs_emulation && !self.client_manager.alive(handle) {
                     return Err(LanMouseConnectionError::TargetEmulationDisabled);
                 }
                 match conn.send(buf).await {
@@ -143,7 +171,6 @@ impl LanMouseConnection {
                         disconnect(&self.client_manager, handle, addr, &self.conns).await;
                     }
                 }
-                log::trace!("{event} >->->->->- {addr}");
                 return Ok(());
             }
         }
@@ -161,6 +188,7 @@ impl LanMouseConnection {
                 self.connecting.clone(),
                 self.recv_tx.clone(),
                 self.ping_response.clone(),
+                self.data_tx.clone(),
             ));
         }
         Err(LanMouseConnectionError::NotConnected)
@@ -175,6 +203,7 @@ async fn connect_to_handle(
     connecting: Rc<Mutex<HashSet<ClientHandle>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    data_tx: Sender<DataIn>,
 ) -> Result<(), LanMouseConnectionError> {
     log::info!("client {handle} connecting ...");
     // sending did not work, figure out active conn.
@@ -230,6 +259,7 @@ async fn connect_to_handle(
             conns,
             tx,
             ping_response.clone(),
+            data_tx,
         ));
         return Ok(());
     }
@@ -273,10 +303,27 @@ async fn receive_loop(
     conns: Rc<Mutex<HashMap<SocketAddr, Arc<dyn Conn + Send + Sync>>>>,
     tx: Sender<(ClientHandle, ProtoEvent)>,
     ping_response: Rc<RefCell<HashSet<SocketAddr>>>,
+    data_tx: Sender<DataIn>,
 ) {
-    let mut buf = [0u8; MAX_EVENT_SIZE];
-    while conn.recv(&mut buf).await.is_ok() {
-        match buf.try_into() {
+    // (VirtualKvm) room for data packets, not just fixed size events
+    let mut buf = [0u8; MAX_DATAGRAM];
+    while let Ok(n) = conn.recv(&mut buf).await {
+        let event = match Datagram::decode(&buf[..n]) {
+            Ok(Datagram::Data(packet)) => {
+                let from = Peer::Client(handle);
+                data_tx
+                    .send(DataIn::Packet { from, packet })
+                    .expect("channel closed");
+                continue;
+            }
+            Ok(Datagram::Event(ProtoEvent::DataAck { id })) => {
+                data_tx.send(DataIn::Ack { id }).expect("channel closed");
+                continue;
+            }
+            Ok(Datagram::Event(event)) => Ok(event),
+            Err(e) => Err(e),
+        };
+        match event {
             Ok(event) => {
                 log::trace!("{addr} <==<==<== {event}");
                 match event {

@@ -67,6 +67,14 @@ pub struct Service {
     /// map from capture handle to connection info
     incoming_conn_info: HashMap<ClientHandle, Incoming>,
     next_trigger_handle: u64,
+    /// (VirtualKvm) reliable messages over the DTLS connections
+    data: crate::data::DataHub,
+    /// (VirtualKvm) data packets / acks from outgoing connections
+    data_rx: local_channel::mpsc::Receiver<crate::data::DataIn>,
+    /// (VirtualKvm) retransmission timer for unacknowledged messages
+    data_tick: tokio::time::Interval,
+    /// (VirtualKvm) hash of the clipboard text last synced in either direction
+    clipboard_hash: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -94,7 +102,8 @@ impl Service {
         // listener + connection
         let listener =
             LanMouseListener::new(config.port(), cert.clone(), authorized_keys.clone()).await?;
-        let conn = LanMouseConnection::new(cert.clone(), client_manager.clone());
+        let (data_tx, data_rx) = local_channel::mpsc::channel();
+        let conn = LanMouseConnection::new(cert.clone(), client_manager.clone(), data_tx);
 
         // input capture + emulation
         let capture_backend = config.capture_backend().map(|b| b.into());
@@ -128,6 +137,10 @@ impl Service {
             incoming_conn_info: Default::default(),
             incoming_conns: Default::default(),
             next_trigger_handle: 0,
+            data: Default::default(),
+            data_rx,
+            data_tick: tokio::time::interval(std::time::Duration::from_millis(350)),
+            clipboard_hash: None,
         };
         Ok(service)
     }
@@ -152,6 +165,8 @@ impl Service {
                 event = self.emulation.event() => self.handle_emulation_event(event),
                 event = self.capture.event() => self.handle_capture_event(event),
                 event = self.resolver.event() => self.handle_resolver_event(event),
+                data = self.data_rx.recv() => self.handle_data_in(data.expect("channel closed")),
+                _ = self.data_tick.tick() => self.retry_data(),
                 _ = self.config.changed() => self.handle_config_change(),
                 r = signal::ctrl_c() => break r.expect("failed to wait for CTRL+C"),
             }
@@ -366,6 +381,11 @@ impl Service {
                     }
                 }
             }
+            EmulationEvent::Data { addr, packet } => {
+                let from = crate::data::Peer::Addr(addr);
+                self.handle_data_in(crate::data::DataIn::Packet { from, packet })
+            }
+            EmulationEvent::DataAck { id } => self.data.acked(id),
             EmulationEvent::PeerLayout { addr, layout } => {
                 let Some(handle) = self.peer_client(addr) else {
                     log::warn!("{addr} sent a layout, but it is not a configured client");
@@ -397,8 +417,10 @@ impl Service {
             ICaptureEvent::CaptureBegin(handle) => {
                 // we entered the capture zone for an incoming connection
                 // => notify it that its capture should be released
-                if let Some(incoming) = self.incoming_conn_info.get(&handle) {
-                    self.emulation.send_leave_event(incoming.addr);
+                if let Some(addr) = self.incoming_conn_info.get(&handle).map(|i| i.addr) {
+                    // (VirtualKvm) our clipboard goes along with the cursor
+                    self.share_clipboard(crate::data::Peer::Addr(addr));
+                    self.emulation.send_leave_event(addr);
                 }
             }
             ICaptureEvent::CaptureDisabled => {
@@ -411,6 +433,8 @@ impl Service {
             }
             ICaptureEvent::ClientEntered(handle) => {
                 log::info!("entering client {handle} ...");
+                // (VirtualKvm) our clipboard goes along with the cursor
+                self.share_clipboard(crate::data::Peer::Client(handle));
                 self.spawn_hook_command(handle, HookKind::Enter);
             }
             ICaptureEvent::ClientLeft(handle) => {
@@ -554,6 +578,89 @@ impl Service {
         } else {
             self.deactivate_client(handle);
         }
+    }
+
+    /// (VirtualKvm) send a message to a peer (retried until acknowledged)
+    fn send_message(&mut self, to: crate::data::Peer, kind: u8, data: &[u8]) {
+        if let Some(packets) = self.data.send(to, kind, data) {
+            self.send_packets(to, packets);
+        }
+    }
+
+    fn send_packets(&mut self, to: crate::data::Peer, packets: Vec<lan_mouse_proto::DataPacket>) {
+        let datagrams = packets.iter().map(|p| p.encode()).collect();
+        match to {
+            crate::data::Peer::Client(h) => self.capture.send_raw(h, datagrams),
+            crate::data::Peer::Addr(a) => self.emulation.send_raw(a, datagrams),
+        }
+    }
+
+    fn retry_data(&mut self) {
+        for (to, packets) in self.data.retries(std::time::Instant::now()) {
+            log::debug!("retrying message to {to:?}");
+            self.send_packets(to, packets);
+        }
+    }
+
+    fn handle_data_in(&mut self, data: crate::data::DataIn) {
+        use crate::data::{DataIn, Peer};
+        match data {
+            DataIn::Ack { id } => self.data.acked(id),
+            DataIn::Packet { from, packet } => {
+                let received = self.data.received(from, packet);
+                if let Some((to, id)) = received.ack {
+                    let ack = lan_mouse_proto::ProtoEvent::DataAck { id };
+                    match to {
+                        Peer::Client(h) => {
+                            let (buf, len): ([u8; lan_mouse_proto::MAX_EVENT_SIZE], usize) =
+                                ack.into();
+                            self.capture.send_raw(h, vec![buf[..len].to_vec()]);
+                        }
+                        Peer::Addr(a) => self.emulation.send_event(a, ack),
+                    }
+                }
+                if let Some((from, kind, data)) = received.message {
+                    self.handle_message(from, kind, data);
+                }
+            }
+        }
+    }
+
+    fn handle_message(&mut self, from: crate::data::Peer, kind: u8, data: Vec<u8>) {
+        match kind {
+            crate::data::KIND_CLIPBOARD => {
+                if !self.config.clipboard_sharing() {
+                    return;
+                }
+                let Ok(text) = String::from_utf8(data) else {
+                    log::warn!("clipboard from {from:?} is not UTF-8");
+                    return;
+                };
+                self.clipboard_hash = Some(text_hash(&text));
+                if vkvm_clipboard::set_text(&text) {
+                    log::info!("clipboard received from {from:?} ({} bytes)", text.len());
+                }
+            }
+            kind => log::debug!("ignoring message of kind {kind} from {from:?}"),
+        }
+    }
+
+    /// (VirtualKvm) send our clipboard text to the peer the cursor moves to,
+    /// unless it is what we already synced
+    fn share_clipboard(&mut self, to: crate::data::Peer) {
+        if !self.config.clipboard_sharing() {
+            return;
+        }
+        let Some(text) = vkvm_clipboard::get_text() else {
+            return;
+        };
+        let hash = text_hash(&text);
+        if self.clipboard_hash == Some(hash) {
+            return;
+        }
+        self.clipboard_hash = Some(hash);
+        log::info!("sharing clipboard with {to:?} ({} bytes)", text.len());
+        self.send_message(to, crate::data::KIND_CLIPBOARD, text.as_bytes());
     }
 
     /// (VirtualKvm) client of an authorized incoming peer. Peers are matched by
@@ -747,4 +854,12 @@ impl std::fmt::Display for HookKind {
             HookKind::Leave => f.write_str("leave"),
         }
     }
+}
+
+/// (VirtualKvm) cheap fingerprint of a clipboard text (change detection only)
+fn text_hash(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
 }

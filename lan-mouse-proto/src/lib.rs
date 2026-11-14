@@ -21,6 +21,104 @@ pub enum ProtocolError {
     /// position type does not exist
     #[error("invalid event id: `{0}`")]
     InvalidPosition(#[from] TryFromPrimitiveError<Position>),
+    /// (VirtualKvm) a variable length data packet, see [`DataPacket`]
+    #[error("data packet")]
+    Data,
+}
+
+/// (VirtualKvm) largest datagram we send or accept (fits a typical LAN MTU after DTLS)
+pub const MAX_DATAGRAM: usize = 1200;
+const DATA_HEADER: usize = 1 + 1 + 4 + 2 + 2;
+/// payload bytes per [`DataPacket`]
+pub const MAX_DATA_PAYLOAD: usize = MAX_DATAGRAM - DATA_HEADER;
+
+/// (VirtualKvm) one part of a larger message (clipboard, agent messages...).
+/// A message is split into `parts` packets that share the same `id`; the
+/// receiver answers [`ProtoEvent::DataAck`] once it has all of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DataPacket {
+    /// what the message is (application defined)
+    pub kind: u8,
+    pub id: u32,
+    pub part: u16,
+    pub parts: u16,
+    pub payload: Vec<u8>,
+}
+
+impl DataPacket {
+    /// whether a received datagram is a data packet
+    pub fn is_data(buf: &[u8]) -> bool {
+        buf.first() == Some(&(EventType::Data as u8))
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(DATA_HEADER + self.payload.len());
+        out.push(EventType::Data as u8);
+        out.push(self.kind);
+        out.extend_from_slice(&self.id.to_be_bytes());
+        out.extend_from_slice(&self.part.to_be_bytes());
+        out.extend_from_slice(&self.parts.to_be_bytes());
+        out.extend_from_slice(&self.payload);
+        out
+    }
+
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        if !Self::is_data(buf) || buf.len() < DATA_HEADER {
+            return None;
+        }
+        let u16_at = |i: usize| u16::from_be_bytes([buf[i], buf[i + 1]]);
+        let packet = Self {
+            kind: buf[1],
+            id: u32::from_be_bytes([buf[2], buf[3], buf[4], buf[5]]),
+            part: u16_at(6),
+            parts: u16_at(8),
+            payload: buf[DATA_HEADER..].to_vec(),
+        };
+        (packet.parts > 0 && packet.part < packet.parts).then_some(packet)
+    }
+
+    /// split `data` into packets (at most `u16::MAX` parts)
+    pub fn split(kind: u8, id: u32, data: &[u8]) -> Vec<DataPacket> {
+        let chunks: Vec<&[u8]> = if data.is_empty() {
+            vec![&[]]
+        } else {
+            data.chunks(MAX_DATA_PAYLOAD).collect()
+        };
+        let parts = chunks.len().min(u16::MAX as usize) as u16;
+        chunks
+            .into_iter()
+            .take(parts as usize)
+            .enumerate()
+            .map(|(i, c)| DataPacket {
+                kind,
+                id,
+                part: i as u16,
+                parts,
+                payload: c.to_vec(),
+            })
+            .collect()
+    }
+}
+
+/// (VirtualKvm) decode a received datagram: either a fixed size [`ProtoEvent`]
+/// or a [`DataPacket`]
+pub enum Datagram {
+    Event(ProtoEvent),
+    Data(DataPacket),
+}
+
+impl Datagram {
+    pub fn decode(buf: &[u8]) -> Result<Self, ProtocolError> {
+        if DataPacket::is_data(buf) {
+            return DataPacket::decode(buf)
+                .map(Datagram::Data)
+                .ok_or(ProtocolError::Data);
+        }
+        let mut fixed = [0u8; MAX_EVENT_SIZE];
+        let n = buf.len().min(MAX_EVENT_SIZE);
+        fixed[..n].copy_from_slice(&buf[..n]);
+        Ok(Datagram::Event(fixed.try_into()?))
+    }
 }
 
 /// Position of a client
@@ -98,6 +196,8 @@ pub enum ProtoEvent {
     /// `sender = receiver + (dx, dy)`; the receiver stores the mirrored layout.
     /// `present == false` removes the layout.
     LayoutSync { present: bool, dx: i32, dy: i32 },
+    /// (VirtualKvm) a [`DataPacket`] message with this id arrived complete
+    DataAck { id: u32 },
 }
 
 impl Display for ProtoEvent {
@@ -135,6 +235,7 @@ impl Display for ProtoEvent {
             ProtoEvent::LayoutSync { present, dx, dy } => {
                 write!(f, "LayoutSync({present}, {dx}, {dy})")
             }
+            ProtoEvent::DataAck { id } => write!(f, "DataAck({id})"),
             ProtoEvent::LeaveAt { x, y } => {
                 write!(f, "LeaveAt({x:.0}, {y:.0})")
             }
@@ -161,6 +262,9 @@ pub enum EventType {
     EnterAt,
     LeaveAt,
     LayoutSync,
+    /// variable length [`DataPacket`] (not a [`ProtoEvent`])
+    Data,
+    DataAck,
 }
 
 impl ProtoEvent {
@@ -188,6 +292,7 @@ impl ProtoEvent {
             ProtoEvent::EnterAt { .. } => EventType::EnterAt,
             ProtoEvent::LeaveAt { .. } => EventType::LeaveAt,
             ProtoEvent::LayoutSync { .. } => EventType::LayoutSync,
+            ProtoEvent::DataAck { .. } => EventType::DataAck,
         }
     }
 }
@@ -272,6 +377,11 @@ impl TryFrom<[u8; MAX_EVENT_SIZE]> for ProtoEvent {
                 dx: decode_i32(&mut buf)?,
                 dy: decode_i32(&mut buf)?,
             }),
+            EventType::DataAck => Ok(Self::DataAck {
+                id: decode_u32(&mut buf)?,
+            }),
+            // data packets are decoded with `DataPacket::decode`
+            EventType::Data => Err(ProtocolError::Data),
         }
     }
 }
@@ -372,6 +482,7 @@ impl From<ProtoEvent> for ([u8; MAX_EVENT_SIZE], usize) {
                     encode_i32(buf, len, dx);
                     encode_i32(buf, len, dy);
                 }
+                ProtoEvent::DataAck { id } => encode_u32(buf, len, id),
             }
         }
         (buf, len)
@@ -480,6 +591,32 @@ mod vkvm_tests {
             } => {}
             e => panic!("unexpected {e}"),
         }
+    }
+
+    #[test]
+    fn data_packets_roundtrip() {
+        let data: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        let packets = DataPacket::split(1, 42, &data);
+        assert_eq!(packets.len(), 3);
+        let mut joined = Vec::new();
+        for p in &packets {
+            let enc = p.encode();
+            assert!(enc.len() <= MAX_DATAGRAM);
+            match Datagram::decode(&enc).unwrap() {
+                Datagram::Data(d) => {
+                    assert_eq!(&d, p);
+                    joined.extend(d.payload);
+                }
+                Datagram::Event(_) => panic!("expected data"),
+            }
+        }
+        assert_eq!(joined, data);
+        // fixed events still decode through Datagram
+        let (buf, len): ([u8; MAX_EVENT_SIZE], usize) = ProtoEvent::DataAck { id: 42 }.into();
+        assert!(matches!(
+            Datagram::decode(&buf[..len]).unwrap(),
+            Datagram::Event(ProtoEvent::DataAck { id: 42 })
+        ));
     }
 
     #[test]

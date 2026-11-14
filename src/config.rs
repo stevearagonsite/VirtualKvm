@@ -106,6 +106,8 @@ struct ConfigToml {
     cert_path: Option<PathBuf>,
     clients: Option<Vec<TomlClient>>,
     authorized_fingerprints: Option<HashMap<String, String>>,
+    /// (VirtualKvm) share the text clipboard with the peers (default: true)
+    clipboard: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Eq, PartialEq)]
@@ -540,6 +542,14 @@ impl Config {
     }
 
     /// release bind for returning control to the host
+    /// (VirtualKvm) whether the text clipboard is shared with the peers
+    pub fn clipboard_sharing(&self) -> bool {
+        self.config_toml
+            .as_ref()
+            .and_then(|c| c.clipboard)
+            .unwrap_or(true)
+    }
+
     pub fn release_bind(&self) -> Vec<scancode::Linux> {
         self.config_toml
             .as_ref()

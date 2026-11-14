@@ -1,5 +1,5 @@
 use futures::{Stream, StreamExt};
-use lan_mouse_proto::{MAX_EVENT_SIZE, ProtoEvent};
+use lan_mouse_proto::{DataPacket, Datagram, MAX_DATAGRAM, MAX_EVENT_SIZE, ProtoEvent};
 use local_channel::mpsc::{Receiver, Sender, channel};
 use rustls::pki_types::CertificateDer;
 use std::{
@@ -45,6 +45,11 @@ pub(crate) enum ListenEvent {
     },
     Rejected {
         fingerprint: String,
+    },
+    /// (VirtualKvm) a data packet (part of a larger message)
+    Data {
+        packet: DataPacket,
+        addr: SocketAddr,
     },
 }
 
@@ -214,6 +219,16 @@ impl LanMouseListener {
         }
     }
 
+    /// (VirtualKvm) send an encoded datagram (e.g. a data packet) to `addr`
+    pub(crate) async fn reply_raw(&self, addr: SocketAddr, buf: &[u8]) {
+        let conns = self.conns.lock().await;
+        for (a, conn) in conns.iter() {
+            if *a == addr {
+                let _ = conn.send(buf).await;
+            }
+        }
+    }
+
     pub(crate) async fn get_certificate_fingerprint(&self, addr: SocketAddr) -> Option<String> {
         if let Some(conn) = self
             .conns
@@ -251,12 +266,16 @@ async fn read_loop(
     conn: ArcConn,
     dtls_tx: Sender<ListenEvent>,
 ) -> Result<(), Error> {
-    let mut b = [0u8; MAX_EVENT_SIZE];
+    // (VirtualKvm) room for data packets, not just fixed size events
+    let mut b = [0u8; MAX_DATAGRAM];
 
-    while conn.recv(&mut b).await.is_ok() {
-        match b.try_into() {
-            Ok(event) => dtls_tx
+    while let Ok(n) = conn.recv(&mut b).await {
+        match Datagram::decode(&b[..n]) {
+            Ok(Datagram::Event(event)) => dtls_tx
                 .send(ListenEvent::Msg { event, addr })
+                .expect("channel closed"),
+            Ok(Datagram::Data(packet)) => dtls_tx
+                .send(ListenEvent::Data { packet, addr })
                 .expect("channel closed"),
             Err(e) => {
                 // Skip the malformed/unknown datagram and keep

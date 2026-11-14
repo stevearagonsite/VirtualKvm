@@ -64,6 +64,15 @@ pub(crate) enum EmulationEvent {
         addr: SocketAddr,
         commit: [u8; 8],
     },
+    /// (VirtualKvm) part of a larger message from the peer
+    Data {
+        addr: SocketAddr,
+        packet: lan_mouse_proto::DataPacket,
+    },
+    /// (VirtualKvm) the peer received one of our messages
+    DataAck {
+        id: u32,
+    },
     /// (VirtualKvm) peer sent its layout for us (to be mirrored)
     PeerLayout {
         addr: SocketAddr,
@@ -81,6 +90,10 @@ pub(crate) enum EmulationEvent {
 enum EmulationRequest {
     Reenable,
     Release(SocketAddr),
+    /// (VirtualKvm) send encoded datagrams to the peer at `addr`
+    SendRaw(SocketAddr, Vec<Vec<u8>>),
+    /// (VirtualKvm) send a protocol event to the peer at `addr`
+    SendEvent(SocketAddr, ProtoEvent),
     ChangePort(u16),
     Terminate,
 }
@@ -116,6 +129,20 @@ impl Emulation {
     pub(crate) fn reenable(&self) {
         self.request_tx
             .send(EmulationRequest::Reenable)
+            .expect("channel closed");
+    }
+
+    /// (VirtualKvm) send encoded datagrams on the incoming connection from `addr`
+    pub(crate) fn send_raw(&self, addr: SocketAddr, datagrams: Vec<Vec<u8>>) {
+        self.request_tx
+            .send(EmulationRequest::SendRaw(addr, datagrams))
+            .expect("channel closed");
+    }
+
+    /// (VirtualKvm) send an event on the incoming connection from `addr`
+    pub(crate) fn send_event(&self, addr: SocketAddr, event: ProtoEvent) {
+        self.request_tx
+            .send(EmulationRequest::SendEvent(addr, event))
             .expect("channel closed");
     }
 
@@ -203,6 +230,9 @@ impl ListenTask {
                                 }
                                 self.event_tx.send(EmulationEvent::PeerHello { addr, commit }).expect("channel closed");
                             }
+                            ProtoEvent::DataAck { id } => {
+                                self.event_tx.send(EmulationEvent::DataAck { id }).expect("channel closed");
+                            }
                             ProtoEvent::LayoutSync { present, dx, dy } => {
                                 let layout = present.then_some(lan_mouse_ipc::DisplayLayout { dx, dy });
                                 self.event_tx.send(EmulationEvent::PeerLayout { addr, layout }).expect("channel closed");
@@ -213,6 +243,9 @@ impl ListenTask {
                             }
                             _ => {}
                         }
+                    }
+                    Some(ListenEvent::Data { packet, addr }) => {
+                        self.event_tx.send(EmulationEvent::Data { addr, packet }).expect("channel closed");
                     }
                     Some(ListenEvent::Accept { addr, fingerprint }) => {
                         self.event_tx.send(EmulationEvent::Connected { addr, fingerprint }).expect("channel closed");
@@ -241,6 +274,12 @@ impl ListenTask {
                         }
                         self.listener.reply(addr, ProtoEvent::Leave(0)).await
                     }
+                    EmulationRequest::SendRaw(addr, datagrams) => {
+                        for d in datagrams {
+                            self.listener.reply_raw(addr, &d).await;
+                        }
+                    }
+                    EmulationRequest::SendEvent(addr, event) => self.listener.reply(addr, event).await,
                     EmulationRequest::ChangePort(port) => {
                         self.listener.request_port_change(port);
                         let result = self.listener.port_changed().await;

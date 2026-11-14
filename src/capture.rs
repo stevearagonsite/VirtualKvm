@@ -75,6 +75,8 @@ enum CaptureRequest {
     UpdateLayout(CaptureHandle),
     /// (VirtualKvm) send our layout for this client to the peer (mirrored there)
     SyncLayout(CaptureHandle),
+    /// (VirtualKvm) send encoded datagrams (data packets) to a client
+    SendRaw(CaptureHandle, Vec<Vec<u8>>),
     /// (VirtualKvm) an incoming (enter-only) capture takes its segments from this client's layout
     LayoutSource(CaptureHandle, lan_mouse_ipc::ClientHandle),
 }
@@ -171,6 +173,13 @@ impl Capture {
         let _ = self
             .request_tx
             .send(CaptureRequest::LayoutSource(handle, client));
+    }
+
+    /// (VirtualKvm) send encoded datagrams (data packets, acks) to a client
+    pub(crate) fn send_raw(&self, handle: CaptureHandle, datagrams: Vec<Vec<u8>>) {
+        let _ = self
+            .request_tx
+            .send(CaptureRequest::SendRaw(handle, datagrams));
     }
 
     /// (VirtualKvm) tell the peer about our layout so it stores the mirrored one
@@ -340,6 +349,16 @@ impl CaptureTask {
         }
     }
 
+    /// (VirtualKvm) data packets for a client (the data hub retries lost ones)
+    async fn send_raw(&self, handle: CaptureHandle, datagrams: Vec<Vec<u8>>) {
+        for d in datagrams {
+            if let Err(e) = self.conn.send_raw(&d, handle).await {
+                log::debug!("client {handle}: data not sent ({e})");
+                break;
+            }
+        }
+    }
+
     async fn retry_layout_sync(&mut self) {
         for handle in self.pending_layout_sync.clone() {
             self.send_layout(handle).await;
@@ -386,6 +405,7 @@ impl CaptureTask {
                         CaptureRequest::LayoutSource(h, c) => {
                             self.layout_source.insert(h, c);
                         }
+                        CaptureRequest::SendRaw(h, datagrams) => self.send_raw(h, datagrams).await,
                     },
                     _ = probe.tick() => self.probe_peers().await,
                     _ = self.cancellation_token.cancelled() => return,
@@ -497,6 +517,7 @@ impl CaptureTask {
                     }
                     CaptureRequest::UpdateLayout(h) => self.apply_segments(capture, h).await?,
                     CaptureRequest::SyncLayout(h) => self.send_layout(h).await,
+                    CaptureRequest::SendRaw(h, datagrams) => self.send_raw(h, datagrams).await,
                     CaptureRequest::LayoutSource(h, c) => {
                         self.layout_source.insert(h, c);
                         let segments = self.segments(h);
