@@ -210,6 +210,7 @@ CI: el upstream ya trae GitHub Actions (`rust.yml`, releases). Se mantienen y se
 | Windows apagada o WoL que no despierta | Checklist en la UI + Ethernet + desactivar Fast Startup |
 | Exposición accidental (IPv6, UI web) | §7: filtros de IP, bind a loopback, token local y validación de Origin |
 | Escritorio seguro de Windows | Fase 5. Mientras tanto, documentarlo como limitación conocida |
+| Quedar sin control de una máquina (input trabado) | Red de seguridad en capas: ver [docs/design/safety.md](docs/design/safety.md) |
 
 ## 14. Fuentes
 
