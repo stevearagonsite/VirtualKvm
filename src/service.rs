@@ -79,6 +79,8 @@ pub struct Service {
     agent_inbox: VecDeque<lan_mouse_ipc::AgentMessage>,
     /// (VirtualKvm) (peer, mailbox) pairs that have written to us
     agent_mailboxes: Vec<(String, String)>,
+    /// (VirtualKvm) local mailboxes: name -> (owner instance, last renewal)
+    local_mailboxes: HashMap<String, (String, std::time::Instant)>,
 }
 
 #[derive(Debug)]
@@ -148,6 +150,7 @@ impl Service {
             clipboard_hash: None,
             agent_inbox: Default::default(),
             agent_mailboxes: Default::default(),
+            local_mailboxes: Default::default(),
         };
         Ok(service)
     }
@@ -229,14 +232,27 @@ impl Service {
                 let messages = self.agent_inbox.drain(..).collect();
                 self.notify_frontend(FrontendEvent::AgentMessages(messages));
             }
-            FrontendRequest::TakeAgentMessagesFor { mailbox } => {
-                // addressed to this mailbox, or to nobody in particular
-                let (mine, rest): (Vec<_>, Vec<_>) = self.agent_inbox.drain(..).partition(|m| {
-                    m.to.as_deref()
-                        .is_none_or(|to| to.eq_ignore_ascii_case(&mailbox))
-                });
+            FrontendRequest::RegisterMailbox { instance, wanted } => {
+                let name = self.register_mailbox(&instance, &wanted);
+                self.notify_frontend(FrontendEvent::MailboxRegistered { instance, name });
+            }
+            FrontendRequest::TakeAgentMessagesFor {
+                mailbox,
+                include_unaddressed,
+            } => {
+                // addressed to this mailbox (and, optionally, to nobody in particular)
+                let (mine, rest): (Vec<_>, Vec<_>) =
+                    self.agent_inbox
+                        .drain(..)
+                        .partition(|m| match m.to.as_deref() {
+                            Some(to) => to.eq_ignore_ascii_case(&mailbox),
+                            None => include_unaddressed,
+                        });
                 self.agent_inbox = rest.into();
-                self.notify_frontend(FrontendEvent::AgentMessages(mine));
+                self.notify_frontend(FrontendEvent::MailboxMessages {
+                    mailbox,
+                    messages: mine,
+                });
             }
             FrontendRequest::GetSettings => self.notify_settings(),
             FrontendRequest::UpdateSettings(s) => {
@@ -790,6 +806,33 @@ impl Service {
         self.notify_frontend(FrontendEvent::Settings(settings));
     }
 
+    /// (VirtualKvm) give an agent session a mailbox no other live session holds.
+    /// Leases last 90 s; `vkvm mcp` renews every 30 s.
+    fn register_mailbox(&mut self, instance: &str, wanted: &str) -> String {
+        const LEASE: std::time::Duration = std::time::Duration::from_secs(90);
+        let now = std::time::Instant::now();
+        self.local_mailboxes
+            .retain(|_, (_, seen)| now.duration_since(*seen) < LEASE);
+        let free = |name: &str, boxes: &HashMap<String, (String, std::time::Instant)>| {
+            boxes.get(name).is_none_or(|(owner, _)| owner == instance)
+        };
+        let mut name = wanted.to_owned();
+        let mut n = 2;
+        while !free(&name, &self.local_mailboxes) {
+            name = format!("{wanted}-{n}");
+            n += 1;
+        }
+        // one mailbox per instance: renaming releases the previous one
+        self.local_mailboxes
+            .retain(|other, (owner, _)| owner != instance || *other == name);
+        if !self.local_mailboxes.contains_key(&name) {
+            log::info!("agent mailbox `{name}` registered");
+        }
+        self.local_mailboxes
+            .insert(name.clone(), (instance.to_owned(), now));
+        name
+    }
+
     /// (VirtualKvm) relay a text message to the AI agent on a peer
     fn send_agent_message(
         &mut self,
@@ -811,7 +854,11 @@ impl Service {
                 Some(p) => format!("no peer named `{p}`"),
                 None => "no peers configured".into(),
             });
-            self.notify_frontend(FrontendEvent::AgentMessageSent { to: None, error });
+            self.notify_frontend(FrontendEvent::AgentMessageSent {
+                to: None,
+                error,
+                from: from.clone(),
+            });
             return;
         };
         let (handle, name) = (*handle, peer_name(*handle, config));
@@ -825,6 +872,7 @@ impl Service {
         self.notify_frontend(FrontendEvent::AgentMessageSent {
             to: Some(name),
             error: None,
+            from,
         });
     }
 

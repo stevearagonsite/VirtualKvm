@@ -56,6 +56,10 @@ pub enum IpcError {
     Listen(#[from] IpcListenerCreationError),
 }
 
+fn default_true() -> bool {
+    true
+}
+
 pub const DEFAULT_PORT: u16 = 4242;
 
 /// (VirtualKvm) loopback port of the frontend IPC on Windows (upstream lan-mouse uses 5252)
@@ -305,15 +309,27 @@ pub enum FrontendEvent {
     Displays(Vec<DisplayInfo>),
     /// (VirtualKvm) agent messages taken from the inbox
     AgentMessages(Vec<AgentMessage>),
-    /// (VirtualKvm) result of [`FrontendRequest::SendAgentMessage`]
+    /// (VirtualKvm) result of [`FrontendRequest::SendAgentMessage`] /
+    /// [`FrontendRequest::SendAgentMessageTo`]; `from` is the sending mailbox
+    /// (events are broadcast to every frontend: match on it)
     AgentMessageSent {
         to: Option<String>,
         error: Option<String>,
+        #[serde(default)]
+        from: Option<String>,
+    },
+    /// (VirtualKvm) answer to [`FrontendRequest::TakeAgentMessagesFor`]
+    /// (broadcast: frontends keep only their own mailbox)
+    MailboxMessages {
+        mailbox: String,
+        messages: Vec<AgentMessage>,
     },
     /// (VirtualKvm) peers reachable by the agent channel
     AgentPeers(Vec<AgentPeer>),
     /// (VirtualKvm) current user settings
     Settings(Settings),
+    /// (VirtualKvm) answer to [`FrontendRequest::RegisterMailbox`]
+    MailboxRegistered { instance: String, name: String },
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -369,8 +385,17 @@ pub enum FrontendRequest {
         to: Option<String>,
         text: String,
     },
-    /// (VirtualKvm) take the messages for `mailbox` (and the unaddressed ones)
-    TakeAgentMessagesFor { mailbox: String },
+    /// (VirtualKvm) take the messages for `mailbox` (and the unaddressed ones,
+    /// unless `include_unaddressed` is false). Answered with
+    /// [`FrontendEvent::MailboxMessages`].
+    TakeAgentMessagesFor {
+        mailbox: String,
+        #[serde(default = "default_true")]
+        include_unaddressed: bool,
+    },
+    /// (VirtualKvm) claim (or renew) a mailbox for an agent session. If another
+    /// live session holds `wanted`, a free variant (`wanted-2`, ...) is assigned.
+    RegisterMailbox { instance: String, wanted: String },
     /// (VirtualKvm) list the peers of the agent channel
     GetAgentPeers,
     /// (VirtualKvm) request [`FrontendEvent::Settings`]

@@ -43,6 +43,10 @@ fn mailbox_name(args: &McpArgs) -> String {
                 .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()))
         })
         .unwrap_or_else(|| "default".into());
+    sanitize_mailbox(&raw)
+}
+
+fn sanitize_mailbox(raw: &str) -> String {
     let clean: String = raw
         .trim()
         .to_lowercase()
@@ -75,16 +79,41 @@ pub enum McpError {
 /// events buffered while no tool call is waiting for them (older ones are dropped)
 const EVENT_BUFFER: usize = 256;
 
+/// renew the mailbox lease this often (the daemon expires it after 90 s)
+const MAILBOX_RENEW: Duration = Duration::from_secs(30);
+
 /// connection to the local daemon. Events are read continuously in the
 /// background: a frontend that stops reading fills its socket and the daemon
 /// drops it. The connection is (re)opened on demand.
-#[derive(Default)]
+///
+/// Every IPC event is broadcast to all frontends, so answers are matched by
+/// mailbox / instance and never taken from another session.
 struct Daemon {
     events: Option<tokio::sync::mpsc::Receiver<FrontendEvent>>,
     requests: Option<AsyncFrontendRequestWriter>,
+    /// unique id of this MCP process (owner of the mailbox lease)
+    instance: String,
+    /// mailbox asked for (directory name, --mailbox or peer_set_mailbox)
+    wanted: String,
+    /// mailbox the daemon assigned (`wanted` or `wanted-N` if taken)
+    mailbox: String,
 }
 
 impl Daemon {
+    fn new(wanted: String) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        Self {
+            events: None,
+            requests: None,
+            instance: format!("{}-{nanos}", std::process::id()),
+            mailbox: wanted.clone(),
+            wanted,
+        }
+    }
+
     async fn connect(&mut self) -> Result<(), String> {
         let (mut reader, writer): (AsyncFrontendEventReader, _) =
             connect_async(Some(IPC_TIMEOUT)).await.map_err(|e| {
@@ -101,7 +130,8 @@ impl Daemon {
         });
         self.events = Some(rx);
         self.requests = Some(writer);
-        Ok(())
+        // claim our mailbox on the (new) connection
+        self.register().await
     }
 
     fn disconnect(&mut self) {
@@ -109,63 +139,110 @@ impl Daemon {
         self.requests = None;
     }
 
+    /// send on the current connection and wait for the matching event.
+    /// Outer error: the connection broke (retry after reconnecting).
+    async fn exchange<T>(
+        &mut self,
+        request: FrontendRequest,
+        pick: &impl Fn(&Self, FrontendEvent) -> Option<T>,
+    ) -> Result<Result<T, String>, String> {
+        let events = self.events.as_mut().ok_or("not connected")?;
+        // forget events from before this request
+        while events.try_recv().is_ok() {}
+        let sent = self
+            .requests
+            .as_mut()
+            .ok_or("not connected")?
+            .request(request)
+            .await;
+        if let Err(e) = sent {
+            self.disconnect();
+            return Err(format!("daemon: {e}"));
+        }
+        let deadline = Instant::now() + IPC_TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let events = self.events.as_mut().ok_or("not connected")?;
+            match tokio::time::timeout(left, events.recv()).await {
+                Err(_) => return Ok(Err("the vkvm daemon did not answer".into())),
+                Ok(None) => {
+                    self.disconnect();
+                    return Err("the vkvm daemon closed the connection".into());
+                }
+                Ok(Some(event)) => {
+                    if let Some(t) = pick(self, event) {
+                        return Ok(Ok(t));
+                    }
+                }
+            }
+        }
+    }
+
+    /// claim (or renew) the mailbox lease
+    async fn register(&mut self) -> Result<(), String> {
+        let request = FrontendRequest::RegisterMailbox {
+            instance: self.instance.clone(),
+            wanted: self.wanted.clone(),
+        };
+        let pick = |d: &Self, e: FrontendEvent| match e {
+            FrontendEvent::MailboxRegistered { instance, name } if instance == d.instance => {
+                Some(name)
+            }
+            _ => None,
+        };
+        let name = self.exchange(request, &pick).await??;
+        if name != self.mailbox {
+            log::info!("vkvm mcp: mailbox `{name}`");
+        }
+        self.mailbox = name;
+        Ok(())
+    }
+
     /// send `request` and wait for the first event `pick` accepts
     /// (reconnects once if the daemon was restarted)
     async fn ask<T>(
         &mut self,
         request: FrontendRequest,
-        pick: impl Fn(FrontendEvent) -> Option<T>,
+        pick: impl Fn(&Self, FrontendEvent) -> Option<T>,
     ) -> Result<T, String> {
         let mut last_error = String::new();
         for _attempt in 0..2 {
             if self.requests.is_none() {
                 self.connect().await?;
             }
-            let events = self.events.as_mut().expect("connected");
-            // forget events from before this request
-            while events.try_recv().is_ok() {}
-            if let Err(e) = self
-                .requests
-                .as_mut()
-                .expect("connected")
-                .request(request.clone())
-                .await
-            {
-                last_error = format!("daemon: {e}");
-                self.disconnect();
-                continue;
-            }
-            let deadline = Instant::now() + IPC_TIMEOUT;
-            loop {
-                let left = deadline.saturating_duration_since(Instant::now());
-                let events = self.events.as_mut().expect("connected");
-                match tokio::time::timeout(left, events.recv()).await {
-                    Err(_) => return Err("the vkvm daemon did not answer".into()),
-                    Ok(None) => {
-                        last_error = "the vkvm daemon closed the connection".into();
-                        self.disconnect();
-                        break;
-                    }
-                    Ok(Some(event)) => {
-                        if let Some(t) = pick(event) {
-                            return Ok(t);
-                        }
-                    }
-                }
+            match self.exchange(request.clone(), &pick).await {
+                Ok(answer) => return answer,
+                Err(e) => last_error = e,
             }
         }
         Err(last_error)
     }
 
-    async fn take_messages(&mut self, mailbox: &str) -> Result<Vec<AgentMessage>, String> {
+    async fn take_messages(&mut self) -> Result<Vec<AgentMessage>, String> {
         let request = FrontendRequest::TakeAgentMessagesFor {
-            mailbox: mailbox.to_owned(),
+            mailbox: self.mailbox.clone(),
+            include_unaddressed: true,
         };
-        self.ask(request, |e| match e {
-            FrontendEvent::AgentMessages(m) => Some(m),
+        self.ask(request, |d, e| match e {
+            FrontendEvent::MailboxMessages { mailbox, messages } if mailbox == d.mailbox => {
+                Some(messages)
+            }
             _ => None,
         })
         .await
+    }
+
+    /// renew the lease (and reconnect if needed); errors surface on the next tool call
+    async fn heartbeat(&mut self) {
+        let result = if self.requests.is_none() {
+            self.connect().await
+        } else {
+            self.register().await
+        };
+        if let Err(e) = result {
+            log::debug!("vkvm mcp: heartbeat: {e}");
+            self.disconnect();
+        }
     }
 }
 
@@ -205,6 +282,18 @@ fn tools(mailbox: &str) -> Value {
             }
         },
         {
+            "name": "peer_set_mailbox",
+            "description": format!("Rename this session's mailbox (now `{mailbox}`). Use your Claude Code \
+                session name (ListAgents shows it as \"This session is <name>\") so that sessions working \
+                in the same project don't share a mailbox. If another live session holds the name, a free \
+                variant is assigned (name-2, ...)."),
+            "inputSchema": {
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "new mailbox name" } },
+                "required": ["name"]
+            }
+        },
+        {
             "name": "peer_status",
             "description": "List the VirtualKvm peers (other machines) this session can message, this \
                 session's mailbox name and the mailboxes on each peer that have written here.",
@@ -236,8 +325,36 @@ fn format_messages(messages: &[AgentMessage]) -> String {
     out
 }
 
-async fn call_tool(daemon: &mut Daemon, mailbox: &str, name: &str, args: &Value) -> Value {
+async fn call_tool(daemon: &mut Daemon, name: &str, args: &Value) -> Value {
+    if daemon.requests.is_none() {
+        if let Err(e) = daemon.connect().await {
+            return text_result(e, true);
+        }
+    }
+    let mailbox = daemon.mailbox.clone();
+    let mailbox = mailbox.as_str();
     match name {
+        "peer_set_mailbox" => {
+            let Some(wanted) = args.get("name").and_then(Value::as_str) else {
+                return text_result("missing `name`".into(), true);
+            };
+            let wanted = sanitize_mailbox(wanted);
+            daemon.wanted = wanted.clone();
+            match daemon.register().await {
+                Ok(()) if daemon.mailbox == wanted => text_result(
+                    format!("this session's mailbox is now `{}`", daemon.mailbox),
+                    false,
+                ),
+                Ok(()) => text_result(
+                    format!(
+                        "`{wanted}` is used by another live session: this session's mailbox is now `{}`",
+                        daemon.mailbox
+                    ),
+                    false,
+                ),
+                Err(e) => text_result(e, true),
+            }
+        }
         "peer_send" => {
             let Some(text) = args.get("text").and_then(Value::as_str) else {
                 return text_result("missing `text`".into(), true);
@@ -256,8 +373,12 @@ async fn call_tool(daemon: &mut Daemon, mailbox: &str, name: &str, args: &Value)
                 text: text.to_owned(),
             };
             match daemon
-                .ask(request, |e| match e {
-                    FrontendEvent::AgentMessageSent { to, error } => Some((to, error)),
+                .ask(request, |d, e| match e {
+                    FrontendEvent::AgentMessageSent { to, error, from }
+                        if from.as_deref() == Some(d.mailbox.as_str()) =>
+                    {
+                        Some((to, error))
+                    }
                     _ => None,
                 })
                 .await
@@ -281,7 +402,7 @@ async fn call_tool(daemon: &mut Daemon, mailbox: &str, name: &str, args: &Value)
                 .min(MAX_WAIT);
             let deadline = Instant::now() + Duration::from_secs(wait);
             loop {
-                match daemon.take_messages(mailbox).await {
+                match daemon.take_messages().await {
                     Err(e) => return text_result(e, true),
                     Ok(m) if !m.is_empty() => return text_result(format_messages(&m), false),
                     Ok(_) if Instant::now() >= deadline => {
@@ -292,7 +413,7 @@ async fn call_tool(daemon: &mut Daemon, mailbox: &str, name: &str, args: &Value)
             }
         }
         "peer_status" => match daemon
-            .ask(FrontendRequest::GetAgentPeers, |e| match e {
+            .ask(FrontendRequest::GetAgentPeers, |_, e| match e {
                 FrontendEvent::AgentPeers(p) => Some(p),
                 _ => None,
             })
@@ -332,7 +453,7 @@ async fn call_tool(daemon: &mut Daemon, mailbox: &str, name: &str, args: &Value)
     }
 }
 
-async fn handle(daemon: &mut Daemon, mailbox: &str, msg: &Value) -> Option<Value> {
+async fn handle(daemon: &mut Daemon, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -358,11 +479,11 @@ async fn handle(daemon: &mut Daemon, mailbox: &str, msg: &Value) -> Option<Value
             })
         }
         "ping" => json!({}),
-        "tools/list" => json!({ "tools": tools(mailbox) }),
+        "tools/list" => json!({ "tools": tools(&daemon.mailbox) }),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            call_tool(daemon, mailbox, name, &args).await
+            call_tool(daemon, name, &args).await
         }
         other => {
             return Some(json!({
@@ -376,17 +497,28 @@ async fn handle(daemon: &mut Daemon, mailbox: &str, msg: &Value) -> Option<Value
 
 pub async fn run(args: McpArgs) -> Result<(), McpError> {
     let mailbox = mailbox_name(&args);
-    log::info!("vkvm mcp: mailbox `{mailbox}`");
-    // connected lazily: the MCP server starts even if the daemon is not running yet
-    let mut daemon = Daemon::default();
+    log::info!("vkvm mcp: wants mailbox `{mailbox}`");
+    let mut daemon = Daemon::new(mailbox);
+    // claim the mailbox now if the daemon is up (otherwise on the first tool call)
+    daemon.heartbeat().await;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
-    while let Some(line) = lines.next_line().await? {
+    let mut renew = tokio::time::interval(MAILBOX_RENEW);
+    renew.tick().await;
+    loop {
+        let line = tokio::select! {
+            line = lines.next_line() => line?,
+            _ = renew.tick() => {
+                daemon.heartbeat().await;
+                continue;
+            }
+        };
+        let Some(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => handle(&mut daemon, &mailbox, &msg).await,
+            Ok(msg) => handle(&mut daemon, &msg).await,
             Err(e) => Some(json!({
                 "jsonrpc": "2.0", "id": null,
                 "error": { "code": -32700, "message": format!("parse error: {e}") }
@@ -406,7 +538,11 @@ mod tests {
 
     #[test]
     fn mailbox_names_are_normalized() {
-        let named = |m: &str| mailbox_name(&McpArgs { mailbox: Some(m.into()) });
+        let named = |m: &str| {
+            mailbox_name(&McpArgs {
+                mailbox: Some(m.into()),
+            })
+        };
         assert_eq!(named("TheDirectorsCut"), "thedirectorscut");
         assert_eq!(named(" Blender PC "), "blender-pc");
         assert_eq!(named("a/b\\c"), "a-b-c");
