@@ -173,6 +173,9 @@ pub struct AgentMessage {
     /// mailbox it is addressed to (`None`: any reader)
     #[serde(default)]
     pub to: Option<String>,
+    /// id given by the sender (unique per sender, also across restarts)
+    #[serde(default)]
+    pub id: Option<String>,
 }
 
 /// (VirtualKvm) user settings shown in the UI

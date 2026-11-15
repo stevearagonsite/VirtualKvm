@@ -76,7 +76,11 @@ pub struct Service {
     /// (VirtualKvm) hash of the clipboard text last synced in either direction
     clipboard_hash: Option<u64>,
     /// (VirtualKvm) messages for the local AI agent (see `vkvm mcp`)
-    agent_inbox: VecDeque<lan_mouse_ipc::AgentMessage>,
+    /// (VirtualKvm) inbox, unacknowledged outgoing messages and seen ids (on disk)
+    agent: crate::agent_store::AgentState,
+    agent_state_path: std::path::PathBuf,
+    /// last scan of the agent outbox for retries
+    agent_retry: std::time::Instant,
     /// (VirtualKvm) (peer, mailbox) pairs that have written to us
     agent_mailboxes: Vec<(String, String)>,
     /// (VirtualKvm) local mailboxes: name -> (owner instance, last renewal)
@@ -127,6 +131,22 @@ impl Service {
         let resolver = DnsResolver::new()?;
 
         let port = config.port();
+        // (VirtualKvm) durable state of the agent channel
+        let agent_state_path = crate::agent_store::AgentState::path(
+            config
+                .config_path()
+                .parent()
+                .unwrap_or(std::path::Path::new(".")),
+        );
+        let agent = crate::agent_store::AgentState::load(&agent_state_path);
+        if !agent.inbox.is_empty() || !agent.outbox.is_empty() {
+            log::info!(
+                "agent state: {} message(s) in the inbox, {} to resend",
+                agent.inbox.len(),
+                agent.outbox.len()
+            );
+        }
+
         let service = Self {
             config,
             capture,
@@ -148,7 +168,9 @@ impl Service {
             data_rx,
             data_tick: tokio::time::interval(std::time::Duration::from_millis(350)),
             clipboard_hash: None,
-            agent_inbox: Default::default(),
+            agent,
+            agent_state_path,
+            agent_retry: std::time::Instant::now(),
             agent_mailboxes: Default::default(),
             local_mailboxes: Default::default(),
         };
@@ -229,7 +251,8 @@ impl Service {
                 text,
             } => self.send_agent_message(peer, from, to, text),
             FrontendRequest::TakeAgentMessages => {
-                let messages = self.agent_inbox.drain(..).collect();
+                let messages = self.agent.inbox.drain(..).collect();
+                self.save_agent_state();
                 self.notify_frontend(FrontendEvent::AgentMessages(messages));
             }
             FrontendRequest::RegisterMailbox { instance, wanted } => {
@@ -251,13 +274,17 @@ impl Service {
             } => {
                 // addressed to this mailbox (and, optionally, to nobody in particular)
                 let (mine, rest): (Vec<_>, Vec<_>) =
-                    self.agent_inbox
+                    self.agent
+                        .inbox
                         .drain(..)
                         .partition(|m| match m.to.as_deref() {
                             Some(to) => to.eq_ignore_ascii_case(&mailbox),
                             None => include_unaddressed,
                         });
-                self.agent_inbox = rest.into();
+                self.agent.inbox = rest.into();
+                if !mine.is_empty() {
+                    self.save_agent_state();
+                }
                 self.notify_frontend(FrontendEvent::MailboxMessages {
                     mailbox,
                     messages: mine,
@@ -477,7 +504,7 @@ impl Service {
                 let from = crate::data::Peer::Addr(addr);
                 self.handle_data_in(crate::data::DataIn::Packet { from, packet })
             }
-            EmulationEvent::DataAck { id } => self.data.acked(id),
+            EmulationEvent::DataAck { id } => self.data_acked(id),
             EmulationEvent::MetaTap => {
                 if let Some(url) = self.config.meta_tap_url() {
                     log::info!("Meta tapped alone: opening {url}");
@@ -679,10 +706,56 @@ impl Service {
     }
 
     /// (VirtualKvm) send a message to a peer (retried until acknowledged)
-    fn send_message(&mut self, to: crate::data::Peer, kind: u8, data: &[u8]) {
-        if let Some(packets) = self.data.send(to, kind, data) {
-            self.send_packets(to, packets);
+    /// returns the transport id of the message
+    fn send_message(&mut self, to: crate::data::Peer, kind: u8, data: &[u8]) -> Option<u32> {
+        let packets = self.data.send(to, kind, data)?;
+        let id = packets.first().map(|p| p.id);
+        self.send_packets(to, packets);
+        id
+    }
+
+    fn data_acked(&mut self, id: u32) {
+        self.data.acked(id);
+        let before = self.agent.outbox.len();
+        self.agent.outbox.retain(|o| o.in_flight != Some(id));
+        if self.agent.outbox.len() != before {
+            self.save_agent_state();
         }
+    }
+
+    fn save_agent_state(&self) {
+        self.agent.save(&self.agent_state_path);
+    }
+
+    /// (VirtualKvm) resend agent messages the peer never acknowledged (also the
+    /// ones left over from before a restart) until it does
+    fn retry_agent_outbox(&mut self) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+        if self.agent_retry.elapsed() < EVERY || self.agent.outbox.is_empty() {
+            return;
+        }
+        self.agent_retry = std::time::Instant::now();
+        let clients = self.client_manager.get_client_states();
+        let mut pending = std::mem::take(&mut self.agent.outbox);
+        for o in pending.iter_mut() {
+            let in_flight = o.in_flight.is_some_and(|id| self.data.is_pending(id));
+            let recent = o.last_try.is_some_and(|t| t.elapsed() < EVERY);
+            if in_flight || recent {
+                continue;
+            }
+            let Some((handle, ..)) = clients.iter().find(|(h, c, _)| peer_name(*h, c) == o.peer)
+            else {
+                continue;
+            };
+            log::info!("resending agent message {} to {}", o.id, o.peer);
+            o.in_flight = self.send_message(
+                crate::data::Peer::Client(*handle),
+                crate::data::KIND_AGENT_ADDRESSED,
+                o.payload.as_bytes(),
+            );
+            o.last_try = Some(std::time::Instant::now());
+        }
+        self.agent.outbox = pending;
     }
 
     fn send_packets(&mut self, to: crate::data::Peer, packets: Vec<lan_mouse_proto::DataPacket>) {
@@ -698,12 +771,13 @@ impl Service {
             log::debug!("retrying message to {to:?}");
             self.send_packets(to, packets);
         }
+        self.retry_agent_outbox();
     }
 
     fn handle_data_in(&mut self, data: crate::data::DataIn) {
         use crate::data::{DataIn, Peer};
         match data {
-            DataIn::Ack { id } => self.data.acked(id),
+            DataIn::Ack { id } => self.data_acked(id),
             DataIn::Packet { from, packet } => {
                 let received = self.data.received(from, packet);
                 if let Some((to, id)) = received.ack {
@@ -744,22 +818,24 @@ impl Service {
                     log::warn!("agent message from {from:?} is not UTF-8");
                     return;
                 };
-                let (from_mailbox, to, text) = if kind == crate::data::KIND_AGENT_ADDRESSED {
+                let (from_mailbox, to, text, id) = if kind == crate::data::KIND_AGENT_ADDRESSED {
                     #[derive(serde::Deserialize)]
                     struct Addressed {
                         from: Option<String>,
                         to: Option<String>,
                         text: String,
+                        #[serde(default)]
+                        id: Option<String>,
                     }
                     match serde_json::from_str::<Addressed>(&payload) {
-                        Ok(a) => (a.from, a.to, a.text),
+                        Ok(a) => (a.from, a.to, a.text, a.id),
                         Err(e) => {
                             log::warn!("bad addressed agent message from {from:?}: {e}");
                             return;
                         }
                     }
                 } else {
-                    (None, None, payload)
+                    (None, None, payload, None)
                 };
                 let from = match from {
                     crate::data::Peer::Client(h) => self
@@ -785,21 +861,26 @@ impl Service {
                         self.agent_mailboxes.push(key);
                     }
                 }
-                const INBOX_MAX: usize = 100;
-                if self.agent_inbox.len() == INBOX_MAX {
-                    self.agent_inbox.pop_front();
+                // resent after a restart (ours or the peer's): already delivered
+                if let Some(id) = &id {
+                    if !self.agent.first_time(&from, id) {
+                        log::info!("dropping duplicate agent message {id} from {from}");
+                        return;
+                    }
                 }
                 let received_at = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or_default();
-                self.agent_inbox.push_back(lan_mouse_ipc::AgentMessage {
+                self.agent.push_inbox(lan_mouse_ipc::AgentMessage {
                     from,
                     text,
                     received_at,
                     from_mailbox,
                     to,
+                    id,
                 });
+                self.save_agent_state();
             }
             kind => log::debug!("ignoring message of kind {kind} from {from:?}"),
         }
@@ -872,12 +953,23 @@ impl Service {
         };
         let (handle, name) = (*handle, peer_name(*handle, config));
         log::info!("agent message to {name} ({} bytes)", text.len());
-        let payload = serde_json::json!({ "from": from, "to": to, "text": text }).to_string();
-        self.send_message(
+        let id = crate::agent_store::new_message_id();
+        let payload =
+            serde_json::json!({ "id": id, "from": from, "to": to, "text": text }).to_string();
+        let in_flight = self.send_message(
             crate::data::Peer::Client(handle),
             crate::data::KIND_AGENT_ADDRESSED,
             payload.as_bytes(),
         );
+        // kept on disk until the peer acknowledges it (survives restarts)
+        self.agent.push_outbox(crate::agent_store::Outgoing {
+            id,
+            peer: name.clone(),
+            payload,
+            in_flight,
+            last_try: Some(std::time::Instant::now()),
+        });
+        self.save_agent_state();
         self.notify_frontend(FrontendEvent::AgentMessageSent {
             to: Some(name),
             error: None,

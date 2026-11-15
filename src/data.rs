@@ -105,6 +105,11 @@ impl DataHub {
         self.outgoing.remove(&id);
     }
 
+    /// whether message `id` is still being sent / retried
+    pub(crate) fn is_pending(&self, id: u32) -> bool {
+        self.outgoing.contains_key(&id)
+    }
+
     /// messages to send again (and give up on the ones retried too often)
     pub(crate) fn retries(&mut self, now: Instant) -> Vec<(Peer, Vec<DataPacket>)> {
         let mut out = Vec::new();
