@@ -77,6 +77,8 @@ pub struct Service {
     clipboard_hash: Option<u64>,
     /// (VirtualKvm) messages for the local AI agent (see `vkvm mcp`)
     agent_inbox: VecDeque<lan_mouse_ipc::AgentMessage>,
+    /// (VirtualKvm) (peer, mailbox) pairs that have written to us
+    agent_mailboxes: Vec<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -145,6 +147,7 @@ impl Service {
             data_tick: tokio::time::interval(std::time::Duration::from_millis(350)),
             clipboard_hash: None,
             agent_inbox: Default::default(),
+            agent_mailboxes: Default::default(),
         };
         Ok(service)
     }
@@ -213,10 +216,27 @@ impl Service {
             FrontendRequest::EnableCapture => self.capture.reenable(),
             FrontendRequest::EnableEmulation => self.emulation.reenable(),
             FrontendRequest::Enumerate() => self.enumerate(),
-            FrontendRequest::SendAgentMessage { peer, text } => self.send_agent_message(peer, text),
+            FrontendRequest::SendAgentMessage { peer, text } => {
+                self.send_agent_message(peer, None, None, text)
+            }
+            FrontendRequest::SendAgentMessageTo {
+                peer,
+                from,
+                to,
+                text,
+            } => self.send_agent_message(peer, from, to, text),
             FrontendRequest::TakeAgentMessages => {
                 let messages = self.agent_inbox.drain(..).collect();
                 self.notify_frontend(FrontendEvent::AgentMessages(messages));
+            }
+            FrontendRequest::TakeAgentMessagesFor { mailbox } => {
+                // addressed to this mailbox, or to nobody in particular
+                let (mine, rest): (Vec<_>, Vec<_>) = self.agent_inbox.drain(..).partition(|m| {
+                    m.to.as_deref()
+                        .is_none_or(|to| to.eq_ignore_ascii_case(&mailbox))
+                });
+                self.agent_inbox = rest.into();
+                self.notify_frontend(FrontendEvent::AgentMessages(mine));
             }
             FrontendRequest::GetSettings => self.notify_settings(),
             FrontendRequest::UpdateSettings(s) => {
@@ -238,10 +258,20 @@ impl Service {
                     .client_manager
                     .get_client_states()
                     .into_iter()
-                    .map(|(h, c, s)| lan_mouse_ipc::AgentPeer {
-                        name: peer_name(h, &c),
-                        connected: s.active_addr.is_some(),
-                        displays: s.remote_displays.len(),
+                    .map(|(h, c, s)| {
+                        let name = peer_name(h, &c);
+                        let mailboxes = self
+                            .agent_mailboxes
+                            .iter()
+                            .filter(|(p, _)| *p == name)
+                            .map(|(_, m)| m.clone())
+                            .collect();
+                        lan_mouse_ipc::AgentPeer {
+                            name,
+                            connected: s.active_addr.is_some(),
+                            displays: s.remote_displays.len(),
+                            mailboxes,
+                        }
                     })
                     .collect();
                 self.notify_frontend(FrontendEvent::AgentPeers(peers));
@@ -684,10 +714,27 @@ impl Service {
                     log::info!("clipboard received from {from:?} ({} bytes)", text.len());
                 }
             }
-            crate::data::KIND_AGENT => {
-                let Ok(text) = String::from_utf8(data) else {
+            crate::data::KIND_AGENT | crate::data::KIND_AGENT_ADDRESSED => {
+                let Ok(payload) = String::from_utf8(data) else {
                     log::warn!("agent message from {from:?} is not UTF-8");
                     return;
+                };
+                let (from_mailbox, to, text) = if kind == crate::data::KIND_AGENT_ADDRESSED {
+                    #[derive(serde::Deserialize)]
+                    struct Addressed {
+                        from: Option<String>,
+                        to: Option<String>,
+                        text: String,
+                    }
+                    match serde_json::from_str::<Addressed>(&payload) {
+                        Ok(a) => (a.from, a.to, a.text),
+                        Err(e) => {
+                            log::warn!("bad addressed agent message from {from:?}: {e}");
+                            return;
+                        }
+                    }
+                } else {
+                    (None, None, payload)
                 };
                 let from = match from {
                     crate::data::Peer::Client(h) => self
@@ -701,7 +748,18 @@ impl Service {
                     }),
                 }
                 .unwrap_or_else(|| "?".into());
-                log::info!("agent message from {from} ({} bytes)", text.len());
+                log::info!(
+                    "agent message from {from}/{} to {} ({} bytes)",
+                    from_mailbox.as_deref().unwrap_or("?"),
+                    to.as_deref().unwrap_or("*"),
+                    text.len()
+                );
+                if let Some(m) = &from_mailbox {
+                    let key = (from.clone(), m.clone());
+                    if !self.agent_mailboxes.contains(&key) {
+                        self.agent_mailboxes.push(key);
+                    }
+                }
                 const INBOX_MAX: usize = 100;
                 if self.agent_inbox.len() == INBOX_MAX {
                     self.agent_inbox.pop_front();
@@ -714,6 +772,8 @@ impl Service {
                     from,
                     text,
                     received_at,
+                    from_mailbox,
+                    to,
                 });
             }
             kind => log::debug!("ignoring message of kind {kind} from {from:?}"),
@@ -731,7 +791,13 @@ impl Service {
     }
 
     /// (VirtualKvm) relay a text message to the AI agent on a peer
-    fn send_agent_message(&mut self, peer: Option<String>, text: String) {
+    fn send_agent_message(
+        &mut self,
+        peer: Option<String>,
+        from: Option<String>,
+        to: Option<String>,
+        text: String,
+    ) {
         let clients = self.client_manager.get_client_states();
         let target = match &peer {
             Some(p) => clients.iter().find(|(h, c, _)| {
@@ -750,10 +816,11 @@ impl Service {
         };
         let (handle, name) = (*handle, peer_name(*handle, config));
         log::info!("agent message to {name} ({} bytes)", text.len());
+        let payload = serde_json::json!({ "from": from, "to": to, "text": text }).to_string();
         self.send_message(
             crate::data::Peer::Client(handle),
-            crate::data::KIND_AGENT,
-            text.as_bytes(),
+            crate::data::KIND_AGENT_ADDRESSED,
+            payload.as_bytes(),
         );
         self.notify_frontend(FrontendEvent::AgentMessageSent {
             to: Some(name),

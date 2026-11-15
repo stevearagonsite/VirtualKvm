@@ -18,6 +18,8 @@ use lan_mouse_proto::DataPacket;
 pub(crate) const KIND_CLIPBOARD: u8 = 1;
 /// message for the AI agent on the peer (UTF-8), see `vkvm mcp`
 pub(crate) const KIND_AGENT: u8 = 2;
+/// addressed agent message: JSON `{"from": mailbox?, "to": mailbox?, "text": ...}`
+pub(crate) const KIND_AGENT_ADDRESSED: u8 = 3;
 
 /// largest message we send or accept
 pub(crate) const MAX_MESSAGE: usize = 512 * 1024;

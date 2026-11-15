@@ -163,6 +163,12 @@ pub struct AgentMessage {
     pub text: String,
     /// unix time (seconds) when it arrived
     pub received_at: u64,
+    /// mailbox (agent session) on the peer that sent it, to reply to
+    #[serde(default)]
+    pub from_mailbox: Option<String>,
+    /// mailbox it is addressed to (`None`: any reader)
+    #[serde(default)]
+    pub to: Option<String>,
 }
 
 /// (VirtualKvm) user settings shown in the UI
@@ -186,6 +192,9 @@ pub struct AgentPeer {
     pub name: String,
     pub connected: bool,
     pub displays: usize,
+    /// mailboxes of that peer that have written to us
+    #[serde(default)]
+    pub mailboxes: Vec<String>,
 }
 
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
@@ -353,6 +362,15 @@ pub enum FrontendRequest {
     SendAgentMessage { peer: Option<String>, text: String },
     /// (VirtualKvm) take (and clear) the received agent messages
     TakeAgentMessages,
+    /// (VirtualKvm) send a message from mailbox `from` to mailbox `to` on a peer
+    SendAgentMessageTo {
+        peer: Option<String>,
+        from: Option<String>,
+        to: Option<String>,
+        text: String,
+    },
+    /// (VirtualKvm) take the messages for `mailbox` (and the unaddressed ones)
+    TakeAgentMessagesFor { mailbox: String },
     /// (VirtualKvm) list the peers of the agent channel
     GetAgentPeers,
     /// (VirtualKvm) request [`FrontendEvent::Settings`]
