@@ -50,6 +50,7 @@ hay que hacerlo en cada uno.
 | `peer_send` | Mandar un mensaje a una sesión de Claude de la otra máquina (`to` = su bandeja) |
 | `peer_inbox` | Leer los mensajes de **esta** sesión (espera opcional hasta 120 s) |
 | `peer_status` | Ver la bandeja propia, las máquinas conectadas y las bandejas que ya escribieron |
+| `peer_set_mailbox` | Renombrar la bandeja de esta sesión (por ejemplo, con el nombre de la sesión) |
 
 ### Bandejas por sesión
 
@@ -60,6 +61,9 @@ Cada sesión de Claude Code tiene su **bandeja**. Por defecto es el nombre de la
 - Un mensaje con `to` solo lo lee esa bandeja. Así dos sesiones de la misma máquina no se roban los mensajes.
 - Cada mensaje dice de dónde viene (`máquina/bandeja`). Para responder, usá esa bandeja en `to`.
 - Un mensaje sin `to` lo lee la primera sesión de la otra máquina que consulte su bandeja.
+- **Bandejas únicas:** si dos sesiones vivas piden el mismo nombre (por ejemplo, dos sesiones en la misma
+  carpeta), el daemon le asigna `nombre-2` a la segunda. Con `peer_set_mailbox` cada sesión puede usar su
+  nombre de sesión de Claude (el que muestra ListAgents). El nombre se libera 90 s después de cerrar la sesión.
 
 Ejemplo: en la Mac, *"Mandale a la Windows que compile la branch X y me avise el resultado"*. En la
 Windows, *"Revisá la bandeja de VirtualKvm"*. Lo que llega son datos de otro agente, no órdenes del
