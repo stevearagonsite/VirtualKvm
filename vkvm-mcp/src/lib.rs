@@ -28,6 +28,10 @@ pub struct McpArgs {
     /// name of the current directory, i.e. the project the session works on)
     #[arg(long)]
     mailbox: Option<String>,
+    /// fixed owner id for the mailbox lease (default: $VKVM_MAILBOX_INSTANCE, else
+    /// one per process). Useful for clients that are relaunched for every command.
+    #[arg(long)]
+    instance: Option<String>,
 }
 
 /// mailbox name of this MCP server (one per agent session)
@@ -100,15 +104,18 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn new(wanted: String) -> Self {
+    fn new(wanted: String, instance: Option<String>) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or_default();
+        let instance = instance
+            .filter(|i| !i.trim().is_empty())
+            .unwrap_or_else(|| format!("{}-{nanos}", std::process::id()));
         Self {
             events: None,
             requests: None,
-            instance: format!("{}-{nanos}", std::process::id()),
+            instance,
             mailbox: wanted.clone(),
             wanted,
         }
@@ -230,6 +237,16 @@ impl Daemon {
             _ => None,
         })
         .await
+    }
+
+    /// give the mailbox back (on exit), so the next session can take the name
+    async fn release(&mut self) {
+        if let Some(requests) = self.requests.as_mut() {
+            let request = FrontendRequest::ReleaseMailbox {
+                instance: self.instance.clone(),
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(1), requests.request(request)).await;
+        }
     }
 
     /// renew the lease (and reconnect if needed); errors surface on the next tool call
@@ -498,7 +515,11 @@ async fn handle(daemon: &mut Daemon, msg: &Value) -> Option<Value> {
 pub async fn run(args: McpArgs) -> Result<(), McpError> {
     let mailbox = mailbox_name(&args);
     log::info!("vkvm mcp: wants mailbox `{mailbox}`");
-    let mut daemon = Daemon::new(mailbox);
+    let instance = args
+        .instance
+        .clone()
+        .or_else(|| std::env::var("VKVM_MAILBOX_INSTANCE").ok());
+    let mut daemon = Daemon::new(mailbox, instance);
     // claim the mailbox now if the daemon is up (otherwise on the first tool call)
     daemon.heartbeat().await;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -529,6 +550,7 @@ pub async fn run(args: McpArgs) -> Result<(), McpError> {
             stdout.flush().await?;
         }
     }
+    daemon.release().await;
     Ok(())
 }
 
@@ -541,11 +563,16 @@ mod tests {
         let named = |m: &str| {
             mailbox_name(&McpArgs {
                 mailbox: Some(m.into()),
+                instance: None,
             })
         };
         assert_eq!(named("TheDirectorsCut"), "thedirectorscut");
         assert_eq!(named(" Blender PC "), "blender-pc");
         assert_eq!(named("a/b\\c"), "a-b-c");
-        assert_eq!(named("   "), mailbox_name(&McpArgs { mailbox: None }));
+        let default = mailbox_name(&McpArgs {
+            mailbox: None,
+            instance: None,
+        });
+        assert_eq!(named("   "), default);
     }
 }

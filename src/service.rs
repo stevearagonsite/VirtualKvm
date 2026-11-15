@@ -236,6 +236,15 @@ impl Service {
                 let name = self.register_mailbox(&instance, &wanted);
                 self.notify_frontend(FrontendEvent::MailboxRegistered { instance, name });
             }
+            FrontendRequest::ReleaseMailbox { instance } => {
+                self.local_mailboxes.retain(|name, (owner, _)| {
+                    let keep = *owner != instance;
+                    if !keep {
+                        log::info!("agent mailbox `{name}` released");
+                    }
+                    keep
+                });
+            }
             FrontendRequest::TakeAgentMessagesFor {
                 mailbox,
                 include_unaddressed,

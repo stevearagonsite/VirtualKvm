@@ -396,6 +396,8 @@ pub enum FrontendRequest {
     /// (VirtualKvm) claim (or renew) a mailbox for an agent session. If another
     /// live session holds `wanted`, a free variant (`wanted-2`, ...) is assigned.
     RegisterMailbox { instance: String, wanted: String },
+    /// (VirtualKvm) release the mailbox held by `instance` (e.g. when it exits)
+    ReleaseMailbox { instance: String },
     /// (VirtualKvm) list the peers of the agent channel
     GetAgentPeers,
     /// (VirtualKvm) request [`FrontendEvent::Settings`]
