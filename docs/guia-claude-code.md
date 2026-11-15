@@ -47,9 +47,19 @@ hay que hacerlo en cada uno.
 
 | Herramienta | Para qué |
 |---|---|
-| `peer_send` | Mandar un mensaje al Claude de la otra máquina |
-| `peer_inbox` | Leer los mensajes recibidos (espera opcional hasta 120 s) |
-| `peer_status` | Ver qué máquinas están conectadas |
+| `peer_send` | Mandar un mensaje a una sesión de Claude de la otra máquina (`to` = su bandeja) |
+| `peer_inbox` | Leer los mensajes de **esta** sesión (espera opcional hasta 120 s) |
+| `peer_status` | Ver la bandeja propia, las máquinas conectadas y las bandejas que ya escribieron |
+
+### Bandejas por sesión
+
+Cada sesión de Claude Code tiene su **bandeja**. Por defecto es el nombre de la carpeta del proyecto
+(una sesión en `~/Workspace/TheDirectorsCut` es `thedirectorscut`). Se puede fijar con la variable
+`VKVM_MAILBOX` o con `vkvm mcp --mailbox <nombre>`.
+
+- Un mensaje con `to` solo lo lee esa bandeja. Así dos sesiones de la misma máquina no se roban los mensajes.
+- Cada mensaje dice de dónde viene (`máquina/bandeja`). Para responder, usá esa bandeja en `to`.
+- Un mensaje sin `to` lo lee la primera sesión de la otra máquina que consulte su bandeja.
 
 Ejemplo: en la Mac, *"Mandale a la Windows que compile la branch X y me avise el resultado"*. En la
 Windows, *"Revisá la bandeja de VirtualKvm"*. Lo que llega son datos de otro agente, no órdenes del
