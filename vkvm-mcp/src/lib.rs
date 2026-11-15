@@ -35,36 +35,89 @@ pub enum McpError {
     Io(#[from] std::io::Error),
 }
 
+/// events buffered while no tool call is waiting for them (older ones are dropped)
+const EVENT_BUFFER: usize = 256;
+
+/// connection to the local daemon. Events are read continuously in the
+/// background: a frontend that stops reading fills its socket and the daemon
+/// drops it. The connection is (re)opened on demand.
+#[derive(Default)]
 struct Daemon {
-    events: AsyncFrontendEventReader,
-    requests: AsyncFrontendRequestWriter,
+    events: Option<tokio::sync::mpsc::Receiver<FrontendEvent>>,
+    requests: Option<AsyncFrontendRequestWriter>,
 }
 
 impl Daemon {
+    async fn connect(&mut self) -> Result<(), String> {
+        let (mut reader, writer): (AsyncFrontendEventReader, _) =
+            connect_async(Some(IPC_TIMEOUT)).await.map_err(|e| {
+                format!("could not connect to the vkvm daemon ({e}): is VirtualKvm running?")
+            })?;
+        let (tx, rx) = tokio::sync::mpsc::channel(EVENT_BUFFER);
+        tokio::task::spawn_local(async move {
+            while let Some(Ok(event)) = reader.next().await {
+                // full buffer: nobody is waiting, drop the event
+                if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = tx.try_send(event) {
+                    break;
+                }
+            }
+        });
+        self.events = Some(rx);
+        self.requests = Some(writer);
+        Ok(())
+    }
+
+    fn disconnect(&mut self) {
+        self.events = None;
+        self.requests = None;
+    }
+
     /// send `request` and wait for the first event `pick` accepts
+    /// (reconnects once if the daemon was restarted)
     async fn ask<T>(
         &mut self,
         request: FrontendRequest,
         pick: impl Fn(FrontendEvent) -> Option<T>,
     ) -> Result<T, String> {
-        self.requests
-            .request(request)
-            .await
-            .map_err(|e| format!("daemon: {e}"))?;
-        let deadline = Instant::now() + IPC_TIMEOUT;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match tokio::time::timeout(left, self.events.next()).await {
-                Err(_) => return Err("the vkvm daemon did not answer".into()),
-                Ok(None) => return Err("the vkvm daemon closed the connection".into()),
-                Ok(Some(Err(e))) => return Err(format!("daemon: {e}")),
-                Ok(Some(Ok(event))) => {
-                    if let Some(t) = pick(event) {
-                        return Ok(t);
+        let mut last_error = String::new();
+        for _attempt in 0..2 {
+            if self.requests.is_none() {
+                self.connect().await?;
+            }
+            let events = self.events.as_mut().expect("connected");
+            // forget events from before this request
+            while events.try_recv().is_ok() {}
+            if let Err(e) = self
+                .requests
+                .as_mut()
+                .expect("connected")
+                .request(request.clone())
+                .await
+            {
+                last_error = format!("daemon: {e}");
+                self.disconnect();
+                continue;
+            }
+            let deadline = Instant::now() + IPC_TIMEOUT;
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                let events = self.events.as_mut().expect("connected");
+                match tokio::time::timeout(left, events.recv()).await {
+                    Err(_) => return Err("the vkvm daemon did not answer".into()),
+                    Ok(None) => {
+                        last_error = "the vkvm daemon closed the connection".into();
+                        self.disconnect();
+                        break;
+                    }
+                    Ok(Some(event)) => {
+                        if let Some(t) = pick(event) {
+                            return Ok(t);
+                        }
                     }
                 }
             }
         }
+        Err(last_error)
     }
 
     async fn take_messages(&mut self) -> Result<Vec<AgentMessage>, String> {
@@ -258,8 +311,8 @@ async fn handle(daemon: &mut Daemon, msg: &Value) -> Option<Value> {
 }
 
 pub async fn run(_args: McpArgs) -> Result<(), McpError> {
-    let (events, requests) = connect_async(Some(IPC_TIMEOUT)).await?;
-    let mut daemon = Daemon { events, requests };
+    // connected lazily: the MCP server starts even if the daemon is not running yet
+    let mut daemon = Daemon::default();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     while let Some(line) = lines.next_line().await? {

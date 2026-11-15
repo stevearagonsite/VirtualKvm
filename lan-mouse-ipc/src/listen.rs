@@ -99,12 +99,21 @@ impl AsyncFrontendListener {
         let mut keep = vec![];
         // TODO do simultaneously
         for tx in self.tx_streams.iter_mut() {
-            // write len + payload
-            if tx.write(json.as_bytes()).await.is_err() {
-                keep.push(false);
-                continue;
+            // (VirtualKvm) a frontend that stops reading (full socket buffer) must
+            // not block the service: give each write a deadline and drop the
+            // connection if it is not met. `write_all` so a line is never cut.
+            const DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
+            match tokio::time::timeout(DEADLINE, tx.write_all(json.as_bytes())).await {
+                Ok(Ok(())) => keep.push(true),
+                Ok(Err(e)) => {
+                    log::debug!("dropping frontend connection: {e}");
+                    keep.push(false);
+                }
+                Err(_) => {
+                    log::warn!("dropping a frontend connection that stopped reading events");
+                    keep.push(false);
+                }
             }
-            keep.push(true);
         }
 
         // could not find a better solution because async
