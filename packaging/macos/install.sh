@@ -36,11 +36,14 @@ launchctl bootout "$DOMAIN/$LEGACY_LABEL" 2>/dev/null || true
 rm -f "$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist" "$DEST/lan-mouse"
 mkdir -p "$DEST" "$LOGDIR" "$(dirname "$PLIST")"
 
-cp "$SRC" "$BIN"
+# nunca sobrescribir en el lugar: en Apple Silicon el kernel cachea la firma del archivo y
+# un binario reescrito en el mismo inode muere con SIGKILL al ejecutarse. Copia nueva + rename.
+install_bin() { cp "$1" "$2.new" && mv -f "$2.new" "$2"; }
+install_bin "$SRC" "$BIN"
 xattr -d com.apple.quarantine "$BIN" 2>/dev/null || true
 NEW_TRAY=0
 if [[ ! -x "$TRAY" || "${1:-}" == "--update-tray" ]]; then
-  cp "$SRC" "$TRAY"
+  install_bin "$SRC" "$TRAY"
   xattr -d com.apple.quarantine "$TRAY" 2>/dev/null || true
   NEW_TRAY=1
 fi
