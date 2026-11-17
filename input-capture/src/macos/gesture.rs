@@ -3,7 +3,9 @@
 //! The three-finger vertical swipe (Mission Control, Ctrl+Up on the Mac) reaches
 //! the event tap as a private "dock control" event. While the cursor is on a
 //! peer it must not act on the Mac: the peer gets Win+Tab (Task View) instead,
-//! once per swipe, so swiping up opens it and swiping down closes it. With the
+//! once per swipe, so swiping up opens it and swiping down closes it. The
+//! horizontal swipe (switch desktops, Ctrl+Left/Right on the Mac) becomes
+//! Win+Ctrl+Left/Right, which switches virtual desktops on Windows. With the
 //! cursor on the Mac nothing is touched.
 //!
 //! Blocking only the dock control events is not enough: the Dock also reads
@@ -53,10 +55,15 @@ const DOCK_CONTROL: u32 = 30;
 /// private fields of the gesture events, as macOS 26 sends them
 const FIELD_HID_TYPE: u32 = 110;
 const FIELD_SWIPE_MOTION: u32 = 123;
+const FIELD_SWIPE_OFFSET: u32 = 124;
 const FIELD_PHASE: u32 = 132;
 /// `kIOHIDEventTypeDockSwipe`
 const HID_DOCK_SWIPE: i64 = 23;
+const MOTION_HORIZONTAL: i64 = 1;
 const MOTION_VERTICAL: i64 = 2;
+/// a horizontal swipe shorter than this (fraction of the screen) is not a
+/// desktop switch
+const MIN_HORIZONTAL_OFFSET: f64 = 0.05;
 const PHASE_BEGAN: i64 = 1;
 const PHASE_ENDED: i64 = 4;
 
@@ -69,19 +76,39 @@ struct Context {
     on_peer: Cell<bool>,
 }
 
-/// Win+Tab, pressed and released
-fn win_tab() -> impl Iterator<Item = CaptureEvent> {
-    let meta = Linux::KeyLeftMeta as u32;
-    let tab = Linux::KeyTab as u32;
-    [(meta, 1), (tab, 1), (tab, 0), (meta, 0)]
-        .into_iter()
-        .map(|(key, state)| {
-            CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key {
-                time: 0,
-                key,
-                state,
-            }))
-        })
+/// a shortcut: the keys pressed in order, then released in reverse
+fn shortcut(keys: &[Linux]) -> Vec<CaptureEvent> {
+    let key = |key: Linux, state| {
+        CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key {
+            time: 0,
+            key: key as u32,
+            state,
+        }))
+    };
+    let press = keys.iter().map(|&k| key(k, 1));
+    let release = keys.iter().rev().map(|&k| key(k, 0));
+    press.chain(release).collect()
+}
+
+extern "C" {
+    fn CGEventGetDoubleValueField(event: CGEventRef, field: u32) -> f64;
+}
+
+/// what a finished dock swipe does on the peer
+fn swipe_shortcut(motion: i64, offset: f64) -> Option<Vec<CaptureEvent>> {
+    use Linux::*;
+    match motion {
+        // Mission Control -> Task View
+        MOTION_VERTICAL => Some(shortcut(&[KeyLeftMeta, KeyTab])),
+        // fingers to the left (negative offset) go to the desktop on the right
+        MOTION_HORIZONTAL if offset <= -MIN_HORIZONTAL_OFFSET => {
+            Some(shortcut(&[KeyLeftMeta, KeyLeftCtrl, KeyRight]))
+        }
+        MOTION_HORIZONTAL if offset >= MIN_HORIZONTAL_OFFSET => {
+            Some(shortcut(&[KeyLeftMeta, KeyLeftCtrl, KeyLeft]))
+        }
+        _ => None,
+    }
 }
 
 extern "C" fn callback(
@@ -113,11 +140,19 @@ extern "C" fn callback(
             );
         }
         if let (PHASE_ENDED, true, Some(pos)) = (phase, ctx.on_peer.get(), current_pos) {
-            if field(FIELD_SWIPE_MOTION) == MOTION_VERTICAL {
-                log::info!("Mission Control swipe on the peer: sending Win+Tab");
-                for e in win_tab() {
-                    let _ = ctx.event_tx.blocking_send((pos, e));
+            let motion = field(FIELD_SWIPE_MOTION);
+            let offset = unsafe { CGEventGetDoubleValueField(event, FIELD_SWIPE_OFFSET) };
+            let events = swipe_shortcut(motion, offset);
+            log::info!(
+                "dock swipe on the peer (motion {motion}, offset {offset:.2}): {}",
+                if events.is_some() {
+                    "sending its shortcut"
+                } else {
+                    "ignored"
                 }
+            );
+            for e in events.into_iter().flatten() {
+                let _ = ctx.event_tx.blocking_send((pos, e));
             }
         }
         ctx.on_peer.get()
@@ -175,5 +210,39 @@ impl Drop for GestureTap {
             core_foundation_sys::mach_port::CFMachPortInvalidate(self.port.as_concrete_TypeRef());
             drop(Box::from_raw(self.ctx));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keys(events: Vec<CaptureEvent>) -> Vec<(u32, u8)> {
+        events
+            .into_iter()
+            .map(|e| match e {
+                CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key { key, state, .. })) => {
+                    (key, state)
+                }
+                e => panic!("unexpected {e}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vertical_swipe_is_task_view() {
+        let (meta, tab) = (Linux::KeyLeftMeta as u32, Linux::KeyTab as u32);
+        let events = swipe_shortcut(MOTION_VERTICAL, -0.4).unwrap();
+        assert_eq!(keys(events), [(meta, 1), (tab, 1), (tab, 0), (meta, 0)]);
+    }
+
+    #[test]
+    fn horizontal_swipe_switches_desktop() {
+        let right = keys(swipe_shortcut(MOTION_HORIZONTAL, -0.5).unwrap());
+        assert_eq!(right[2], (Linux::KeyRight as u32, 1));
+        let left = keys(swipe_shortcut(MOTION_HORIZONTAL, 0.5).unwrap());
+        assert_eq!(left[2], (Linux::KeyLeft as u32, 1));
+        // a short swipe that went back is not a switch
+        assert!(swipe_shortcut(MOTION_HORIZONTAL, 0.01).is_none());
     }
 }
