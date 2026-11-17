@@ -62,7 +62,7 @@ de su config: `~/.config/virtualkvm/config.toml` en macOS o `%LOCALAPPDATA%\virt
 - **Ícono → Prender / Apagar**: activa o detiene VirtualKvm (se recuerda al reiniciar).
 - **Ícono → Monitores y opciones…**: arrastrá los monitores de la otra máquina hasta que toquen los tuyos y guardá.
 - **Recuperar el mouse y el teclado**: **Ctrl + Shift + Win + Alt** (en macOS, **Ctrl + Shift + Cmd + Option**).
-- **Mission Control → Vista de tareas**: con la Windows conectada y en pantalla, deslizar tres dedos hacia arriba o abajo en el trackpad de la Mac manda **Win + Tab** (abre y cierra la vista de tareas), esté donde esté el cursor. Si la Windows está apagada o el KVM físico pasó su monitor a la Mac, Mission Control funciona como siempre.
+- **Mission Control → Vista de tareas**: con el cursor en la Windows, deslizar tres dedos hacia arriba o abajo en el trackpad de la Mac manda **Win + Tab** (abre y cierra la vista de tareas) en vez de abrir Mission Control en la Mac.
 - **Si una Windows no responde**: **Ctrl + Alt + Supr** → Administrador de tareas → finalizar `vkvm.exe`.
   Más en [docs/design/safety.md](docs/design/safety.md).
 

@@ -45,9 +45,6 @@ pub enum CaptureEvent {
     BeginAt { x: f64, y: f64, side: Position },
     /// input event coming from capture handle
     Input(Event),
-    /// (VirtualKvm) input meant for the peer even while the cursor is on this
-    /// machine (e.g. the Mission Control gesture turned into Win+Tab)
-    Remote(Event),
 }
 
 impl Display for CaptureEvent {
@@ -58,7 +55,6 @@ impl Display for CaptureEvent {
                 write!(f, "begin capture at ({x:.0}, {y:.0}) through {side}")
             }
             CaptureEvent::Input(e) => write!(f, "{e}"),
-            CaptureEvent::Remote(e) => write!(f, "remote {e}"),
         }
     }
 }
@@ -240,13 +236,6 @@ impl InputCapture {
         Ok(())
     }
 
-    /// (VirtualKvm) whether the peer of client `id` is connected right now
-    pub fn set_online(&mut self, id: CaptureHandle, online: bool) {
-        if let Some(&pos) = self.id_map.get(&id) {
-            self.capture.set_online(pos, online);
-        }
-    }
-
     /// (VirtualKvm) release the mouse, placing the cursor at `(x, y)`
     pub async fn release_at(&mut self, x: f64, y: f64) -> Result<(), CaptureError> {
         self.pressed_keys.clear();
@@ -385,9 +374,6 @@ trait Capture: Stream<Item = Result<(Position, CaptureEvent), CaptureError>> + U
     /// (VirtualKvm) restrict the barrier at `pos` to a display segment.
     /// Backends without support keep using the whole desktop edge.
     fn set_segments(&mut self, _pos: Position, _segments: Option<Vec<Segment>>) {}
-
-    /// (VirtualKvm) whether the peer at `pos` is connected right now
-    fn set_online(&mut self, _pos: Position, _online: bool) {}
 
     /// (VirtualKvm) release the mouse, placing the cursor at `(x, y)`.
     /// Returns `false` if the backend can't, so the caller does a plain release.

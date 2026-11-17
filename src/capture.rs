@@ -421,35 +421,6 @@ impl CaptureTask {
         Ok(())
     }
 
-    /// (VirtualKvm) tell the capture backend which peers are connected (so the
-    /// Mission Control gesture only goes to a peer that can take it)
-    fn sync_online(
-        &self,
-        capture: &mut InputCapture,
-        known: &mut std::collections::HashMap<CaptureHandle, bool>,
-    ) {
-        for &(handle, _, capture_type) in &self.captures {
-            if capture_type != CaptureType::Default {
-                continue;
-            }
-            let online = self.client_manager.active_addr(handle).is_some();
-            if known.insert(handle, online) != Some(online) {
-                log::info!("client {handle}: online {online}");
-                capture.set_online(handle, online);
-            }
-        }
-    }
-
-    /// (VirtualKvm) input meant for the peer even while the cursor is here
-    async fn send_remote(&self, handle: CaptureHandle, event: input_event::Event) {
-        if self.get_type(handle) == CaptureType::EnterOnly {
-            return;
-        }
-        if let Err(e) = self.conn.send(ProtoEvent::Input(event), handle).await {
-            log::warn!("client {handle}: remote input not sent ({e})");
-        }
-    }
-
     fn get_type(&self, handle: CaptureHandle) -> CaptureType {
         self.captures
             .iter()
@@ -534,14 +505,10 @@ impl CaptureTask {
     ) -> Result<(), InputCaptureError> {
         let mut probe = tokio::time::interval(std::time::Duration::from_secs(5));
         let mut displays = tokio::time::interval(std::time::Duration::from_secs(1));
-        let mut online = std::collections::HashMap::new();
         loop {
             tokio::select! {
                 _ = probe.tick() => self.probe_peers().await,
-                _ = displays.tick() => {
-                    self.check_local_displays(capture).await?;
-                    self.sync_online(capture, &mut online);
-                }
+                _ = displays.tick() => self.check_local_displays(capture).await?,
                 event = capture.next() => match event {
                     Some(event) => self.handle_capture_event(capture, event?).await?,
                     None => return Ok(()),
@@ -636,11 +603,6 @@ impl CaptureTask {
         let (handle, event) = event;
         log::trace!("({handle}): {event:?}");
 
-        if let CaptureEvent::Remote(e) = event {
-            self.send_remote(handle, e).await;
-            return Ok(());
-        }
-
         if capture.keys_pressed(&self.release_bind.borrow()) {
             log::info!("releasing capture: release-bind pressed");
             return self.release_capture(capture).await;
@@ -708,7 +670,7 @@ impl CaptureTask {
 
         let event = match event {
             CaptureEvent::Begin | CaptureEvent::BeginAt { .. } => enter,
-            CaptureEvent::Input(e) | CaptureEvent::Remote(e) => match self.state {
+            CaptureEvent::Input(e) => match self.state {
                 // connection not acknowledged, repeat `Enter` event
                 State::WaitingForAck => enter,
                 State::Sending => ProtoEvent::Input(e),

@@ -66,8 +66,6 @@ struct InputCaptureState {
     segments: HashMap<Position, Vec<Segment>>,
     /// (VirtualKvm) display edge crossed by the current capture
     crossed_side: Option<Position>,
-    /// (VirtualKvm) positions whose peer is connected right now
-    online: HashSet<Position>,
 }
 
 #[derive(Debug)]
@@ -80,8 +78,6 @@ enum ProducerEvent {
     SetSegments(Position, Option<Vec<Segment>>),
     /// (VirtualKvm) release with the cursor placed at the given point
     ReleaseAt(f64, f64),
-    /// (VirtualKvm) the peer at this position connected or went away
-    SetOnline(Position, bool),
     EventTapDisabled,
     DisplayReconfigured,
 }
@@ -96,7 +92,6 @@ impl InputCaptureState {
             modifier_state: Default::default(),
             segments: HashMap::new(),
             crossed_side: None,
-            online: HashSet::new(),
         };
         res.update_bounds()?;
         Ok(res)
@@ -133,15 +128,6 @@ impl InputCaptureState {
             }
         }
         None
-    }
-
-    /// (VirtualKvm) a connected peer the cursor can reach right now: not one
-    /// whose monitor a physical KVM switched to this machine (no segments left)
-    fn reachable_peer(&self) -> Option<Position> {
-        self.active_clients
-            .iter()
-            .copied()
-            .find(|p| self.online.contains(p) && self.segments.get(p).is_none_or(|s| !s.is_empty()))
     }
 
     // Get the max bounds of all displays
@@ -237,13 +223,6 @@ impl InputCaptureState {
                     self.segments.remove(&p);
                 }
             },
-            ProducerEvent::SetOnline(p, online) => {
-                if online {
-                    self.online.insert(p);
-                } else {
-                    self.online.remove(&p);
-                }
-            }
             ProducerEvent::ReleaseAt(x, y) => {
                 if self.current_pos.is_some() {
                     self.enter_position = Some(CGPoint::new(x, y));
@@ -901,14 +880,6 @@ impl Capture for MacOSInputCapture {
             let _ = notify_tx
                 .send(ProducerEvent::SetSegments(pos, segments))
                 .await;
-        });
-    }
-
-    fn set_online(&mut self, pos: Position, online: bool) {
-        let notify_tx = self.notify_tx.clone();
-        tokio::task::spawn_local(async move {
-            log::debug!("peer at {pos} online: {online}");
-            let _ = notify_tx.send(ProducerEvent::SetOnline(pos, online)).await;
         });
     }
 

@@ -1,11 +1,9 @@
 //! (VirtualKvm) Mission Control gesture while the cursor is on a peer.
 //!
 //! The three-finger vertical swipe (Mission Control, Ctrl+Up on the Mac) reaches
-//! the event tap as a private "dock control" event. While a peer is connected
-//! and reachable it must not act on the Mac, wherever the cursor is: the peer
-//! gets Win+Tab (Task View) instead, once per swipe, so swiping up opens it and
-//! swiping down closes it. With no peer on screen (switched off, or its monitor
-//! switched to the Mac by a physical KVM) Mission Control works as usual.
+//! the event tap as a private "dock control" event. While the cursor is on a
+//! peer it must not act on the Mac: the peer gets Win+Tab (Task View) instead,
+//! once per swipe, so swiping up opens it and swiping down closes it.
 //!
 //! `core-graphics`' `CGEventType` has no variant for these private types (one
 //! arriving through it would be an invalid enum value), so this tap is created
@@ -58,9 +56,9 @@ struct Context {
     state: Arc<Mutex<InputCaptureState>>,
     event_tx: Sender<(Position, CaptureEvent)>,
     port: Cell<*mut c_void>,
-    /// the peer that takes the swipe in progress, chosen when it begins: the
+    /// whether the swipe in progress began with the cursor on a peer: the
     /// whole swipe goes to the same side, even if the cursor crosses midway
-    target: Cell<Option<Position>>,
+    on_peer: Cell<bool>,
 }
 
 /// Win+Tab, pressed and released
@@ -70,7 +68,7 @@ fn win_tab() -> impl Iterator<Item = CaptureEvent> {
     [(meta, 1), (tab, 1), (tab, 0), (meta, 0)]
         .into_iter()
         .map(|(key, state)| {
-            CaptureEvent::Remote(Event::Keyboard(KeyboardEvent::Key {
+            CaptureEvent::Input(Event::Keyboard(KeyboardEvent::Key {
                 time: 0,
                 key,
                 state,
@@ -99,17 +97,16 @@ extern "C" fn callback(
     if field(FIELD_HID_TYPE) != HID_DOCK_SWIPE || field(FIELD_SWIPE_MOTION) != MOTION_VERTICAL {
         return event;
     }
+    let current_pos = ctx.state.blocking_lock().current_pos;
     let phase = field(FIELD_PHASE);
     if phase == PHASE_BEGAN {
-        let state = ctx.state.blocking_lock();
-        ctx.target
-            .set(state.current_pos.or_else(|| state.reachable_peer()));
+        ctx.on_peer.set(current_pos.is_some());
     }
-    let Some(pos) = ctx.target.get() else {
+    if !ctx.on_peer.get() {
         return event;
-    };
-    if phase == PHASE_ENDED {
-        log::info!("Mission Control swipe: sending Win+Tab to the peer at {pos}");
+    }
+    if let (PHASE_ENDED, Some(pos)) = (phase, current_pos) {
+        log::info!("Mission Control swipe on the peer: sending Win+Tab");
         for e in win_tab() {
             let _ = ctx.event_tx.blocking_send((pos, e));
         }
@@ -133,7 +130,7 @@ impl GestureTap {
             state,
             event_tx,
             port: Cell::new(std::ptr::null_mut()),
-            target: Cell::new(None),
+            on_peer: Cell::new(false),
         }));
         let port = unsafe {
             CGEventTapCreate(
