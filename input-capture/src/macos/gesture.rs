@@ -100,12 +100,12 @@ fn swipe_shortcut(motion: i64, offset: f64) -> Option<Vec<CaptureEvent>> {
     match motion {
         // Mission Control -> Task View
         MOTION_VERTICAL => Some(shortcut(&[KeyLeftMeta, KeyTab])),
-        // fingers to the left (negative offset) go to the desktop on the right
+        // negative offset -> desktop on the left, as tested on Windows 11
         MOTION_HORIZONTAL if offset <= -MIN_HORIZONTAL_OFFSET => {
-            Some(shortcut(&[KeyLeftMeta, KeyLeftCtrl, KeyRight]))
+            Some(shortcut(&[KeyLeftMeta, KeyLeftCtrl, KeyLeft]))
         }
         MOTION_HORIZONTAL if offset >= MIN_HORIZONTAL_OFFSET => {
-            Some(shortcut(&[KeyLeftMeta, KeyLeftCtrl, KeyLeft]))
+            Some(shortcut(&[KeyLeftMeta, KeyLeftCtrl, KeyRight]))
         }
         _ => None,
     }
@@ -238,10 +238,10 @@ mod tests {
 
     #[test]
     fn horizontal_swipe_switches_desktop() {
-        let right = keys(swipe_shortcut(MOTION_HORIZONTAL, -0.5).unwrap());
-        assert_eq!(right[2], (Linux::KeyRight as u32, 1));
-        let left = keys(swipe_shortcut(MOTION_HORIZONTAL, 0.5).unwrap());
+        let left = keys(swipe_shortcut(MOTION_HORIZONTAL, -0.5).unwrap());
         assert_eq!(left[2], (Linux::KeyLeft as u32, 1));
+        let right = keys(swipe_shortcut(MOTION_HORIZONTAL, 0.5).unwrap());
+        assert_eq!(right[2], (Linux::KeyRight as u32, 1));
         // a short swipe that went back is not a switch
         assert!(swipe_shortcut(MOTION_HORIZONTAL, 0.01).is_none());
     }
