@@ -99,6 +99,7 @@ impl Capture {
             client_manager,
             pending_enter: None,
             crossing: None,
+            local_displays: local_geometry(),
             pending_layout_sync: Default::default(),
             layout_source: Default::default(),
             conn,
@@ -224,6 +225,8 @@ struct CaptureTask {
     pending_layout_sync: HashSet<CaptureHandle>,
     /// (VirtualKvm) local point where the barrier was crossed
     crossing: Option<(f64, f64, Position)>,
+    /// (VirtualKvm) last seen geometry of our displays
+    local_displays: Vec<(i32, i32, u32, u32)>,
     conn: LanMouseConnection,
     event_tx: Sender<ICaptureEvent>,
     release_bind: Rc<RefCell<Vec<scancode::Linux>>>,
@@ -376,6 +379,48 @@ impl CaptureTask {
         }
     }
 
+    /// (VirtualKvm) react when our displays change (a monitor was plugged in or
+    /// out, or a physical KVM switched one to or away from this machine):
+    /// re-evaluate every barrier, tell the peers, and if the active peer can no
+    /// longer be reached (its monitor is now ours) bring the cursor back here.
+    async fn check_local_displays(
+        &mut self,
+        capture: &mut InputCapture,
+    ) -> Result<(), CaptureError> {
+        let now = local_geometry();
+        if now == self.local_displays {
+            return Ok(());
+        }
+        log::info!(
+            "local displays changed: {:?} -> {now:?}",
+            self.local_displays
+        );
+        self.local_displays = now;
+        let handles: Vec<_> = self.captures.iter().map(|&(h, ..)| h).collect();
+        for h in handles {
+            let segments = self.segments(h);
+            log::info!("capture {h}: barrier segments {segments:?}");
+            capture.set_segments(h, segments).await?;
+        }
+        if let Some(active) = self.active_client {
+            if self.segments(active).is_some_and(|s| s.is_empty()) {
+                log::info!("client {active} is no longer reachable: releasing capture");
+                self.release_capture(capture).await?;
+            }
+        }
+        for (handle, _, state) in self.client_manager.get_client_states() {
+            if state.active_addr.is_some() {
+                for event in crate::displays::local_display_events() {
+                    if let Err(e) = self.conn.send(event, handle).await {
+                        log::debug!("client {handle}: display info not sent ({e})");
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn get_type(&self, handle: CaptureHandle) -> CaptureType {
         self.captures
             .iter()
@@ -459,9 +504,11 @@ impl CaptureTask {
         capture: &mut InputCapture,
     ) -> Result<(), InputCaptureError> {
         let mut probe = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut displays = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {
                 _ = probe.tick() => self.probe_peers().await,
+                _ = displays.tick() => self.check_local_displays(capture).await?,
                 event = capture.next() => match event {
                     Some(event) => self.handle_capture_event(capture, event?).await?,
                     None => return Ok(()),
@@ -767,4 +814,14 @@ impl<T> Drop for DropGuard<T> {
             .send(self.on_drop.take().expect("item"))
             .expect("channel closed");
     }
+}
+
+/// (VirtualKvm) geometry of our displays, to notice when they change
+fn local_geometry() -> Vec<(i32, i32, u32, u32)> {
+    let mut g: Vec<_> = vkvm_displays::list()
+        .iter()
+        .map(|d| (d.x, d.y, d.width, d.height))
+        .collect();
+    g.sort_unstable();
+    g
 }

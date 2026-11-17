@@ -121,12 +121,31 @@ impl Layout {
             .collect()
     }
 
-    /// every stretch of a local edge touched by a peer display
+    /// whether a peer display (local coordinates) is covered by one of ours.
+    /// With a physical KVM the same monitor can switch to this machine: then it
+    /// shows up locally right where the layout puts the peer's display, which
+    /// is dark for the peer. The cursor must stay here instead of crossing.
+    fn covered(&self, placed: &Rect) -> bool {
+        self.local.iter().any(|l| {
+            (l.x + l.w).min(placed.x + placed.w) - l.x.max(placed.x) > TOUCH
+                && (l.y + l.h).min(placed.y + placed.h) - l.y.max(placed.y) > TOUCH
+        })
+    }
+
+    /// the peer's displays the cursor can cross into (local coordinates)
+    fn reachable(&self) -> Vec<Rect> {
+        self.placed()
+            .into_iter()
+            .filter(|r| !self.covered(r))
+            .collect()
+    }
+
+    /// every stretch of a local edge touched by a reachable peer display
     pub(crate) fn contacts(&self) -> Vec<Contact> {
         use lan_mouse_ipc::Position::*;
         let mut out = Vec::new();
         for l in &self.local {
-            for r in self.placed() {
+            for r in self.reachable() {
                 let y_overlap = (l.y.max(r.y), (l.y + l.h).min(r.y + r.h));
                 let x_overlap = (l.x.max(r.x), (l.x + l.w).min(r.x + r.w));
                 let candidates = [
@@ -160,12 +179,7 @@ impl Layout {
 
     /// whether a peer display overlaps one of ours (invalid layout)
     pub(crate) fn overlaps(&self) -> bool {
-        self.placed().iter().any(|r| {
-            self.local.iter().any(|l| {
-                (l.x + l.w).min(r.x + r.w) - l.x.max(r.x) > TOUCH
-                    && (l.y + l.h).min(r.y + r.h) - l.y.max(r.y) > TOUCH
-            })
-        })
+        self.placed().iter().any(|r| self.covered(r))
     }
 
     /// entry point (peer coordinates) for a crossing at local `(x, y)` through `side`
@@ -182,6 +196,13 @@ impl Layout {
         let r = self
             .remote
             .iter()
+            .filter(|r| {
+                !self.covered(&Rect {
+                    x: r.x + self.dx,
+                    y: r.y + self.dy,
+                    ..**r
+                })
+            })
             .filter(|r| {
                 rx >= r.x - TOUCH - 1.0
                     && rx < r.x + r.w + TOUCH + 1.0
@@ -333,6 +354,42 @@ mod tests {
             w.to_remote(Position::Right, 1919.0, 540.0),
             Some((928.0, -540.0))
         );
+    }
+
+    /// the physical KVM switched the Windows monitor to the Mac: it appears
+    /// as a third Mac display exactly where the layout places the Windows one
+    fn mac_with_switched_monitor() -> Layout {
+        let local = [
+            display("Built-in", 0, 0, 1512, 982),
+            display("LF27T35", -993, -1080, 1920, 1080),
+            display("LF27T35", 927, -1080, 1920, 1080),
+        ];
+        let remote = [display("DISPLAY1", 0, 0, 1920, 1080)];
+        Layout::new(
+            DisplayLayout {
+                dx: -993,
+                dy: -1080,
+            },
+            &local,
+            &remote,
+        )
+    }
+
+    #[test]
+    fn switched_monitor_stays_local() {
+        let g = mac_with_switched_monitor();
+        // no edge leads to the (dark) Windows display: the cursor stays on the Mac
+        assert!(g.contacts().is_empty());
+        assert_eq!(g.primary_side(), None);
+        assert_eq!(g.to_remote(Position::Left, 927.0, -540.0), None);
+        // coming back from the Windows still lands on a Mac display
+        assert_eq!(g.to_local(1919.0, 300.0), Some((925.0, -780.0)));
+    }
+
+    #[test]
+    fn switching_back_restores_the_edges() {
+        // same layout, the monitor went back to the Windows
+        assert_eq!(mac().contacts().len(), 2);
     }
 
     #[test]
