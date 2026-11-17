@@ -40,6 +40,8 @@ use tokio::sync::{
     oneshot,
 };
 
+mod gesture;
+
 #[derive(Debug, Default)]
 struct Bounds {
     xmin: f64,
@@ -659,6 +661,8 @@ fn event_tap_thread(
 ) {
     // Clone now: create_event_tap consumes notify_tx into its closure.
     let display_notify_tx = notify_tx.clone();
+    let gesture_state = client_state.clone();
+    let gesture_tx = event_tx.clone();
 
     let _tap = match create_event_tap(client_state, notify_tx, event_tx) {
         Err(e) => {
@@ -671,6 +675,12 @@ fn event_tap_thread(
             tap
         }
     };
+
+    // (VirtualKvm) the Mission Control swipe becomes Win+Tab on the peer
+    let _gesture_tap = gesture::GestureTap::new(gesture_state, gesture_tx);
+    if _gesture_tap.is_none() {
+        log::warn!("could not create the gesture event tap: Mission Control stays on the Mac");
+    }
 
     // Register a Quartz display-reconfiguration callback so the
     // capture state's bounds get refreshed when the user plugs in a
