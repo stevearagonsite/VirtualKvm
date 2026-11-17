@@ -3,7 +3,13 @@
 //! The three-finger vertical swipe (Mission Control, Ctrl+Up on the Mac) reaches
 //! the event tap as a private "dock control" event. While the cursor is on a
 //! peer it must not act on the Mac: the peer gets Win+Tab (Task View) instead,
-//! once per swipe, so swiping up opens it and swiping down closes it.
+//! once per swipe, so swiping up opens it and swiping down closes it. With the
+//! cursor on the Mac nothing is touched.
+//!
+//! Blocking only the dock control events is not enough: the Dock also reads
+//! the raw gesture events and still opened Mission Control (or switched
+//! desktops sideways). So while the cursor is on a peer every trackpad gesture
+//! (both types) is kept from the Mac.
 //!
 //! `core-graphics`' `CGEventType` has no variant for these private types (one
 //! arriving through it would be an invalid enum value), so this tap is created
@@ -40,6 +46,8 @@ const HEAD_INSERT_EVENT_TAP: u32 = 0;
 const DEFAULT_TAP: u32 = 0;
 const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 
+/// private event type of the raw trackpad gestures (`NSEventTypeGesture`)
+const GESTURE: u32 = 29;
 /// private event type of the Dock gestures (`kCGSEventDockControl`)
 const DOCK_CONTROL: u32 = 30;
 /// private fields of the gesture events, as macOS 26 sends them
@@ -56,7 +64,7 @@ struct Context {
     state: Arc<Mutex<InputCaptureState>>,
     event_tx: Sender<(Position, CaptureEvent)>,
     port: Cell<*mut c_void>,
-    /// whether the swipe in progress began with the cursor on a peer: the
+    /// whether the dock swipe in progress began with the cursor on a peer: the
     /// whole swipe goes to the same side, even if the cursor crosses midway
     on_peer: Cell<bool>,
 }
@@ -90,29 +98,34 @@ extern "C" fn callback(
         unsafe { CGEventTapEnable(ctx.port.get(), true) };
         return event;
     }
-    if event_type != DOCK_CONTROL {
-        return event;
-    }
-    let field = |f| unsafe { CGEventGetIntegerValueField(event, f) };
-    if field(FIELD_HID_TYPE) != HID_DOCK_SWIPE || field(FIELD_SWIPE_MOTION) != MOTION_VERTICAL {
+    if event_type != GESTURE && event_type != DOCK_CONTROL {
         return event;
     }
     let current_pos = ctx.state.blocking_lock().current_pos;
-    let phase = field(FIELD_PHASE);
-    if phase == PHASE_BEGAN {
-        ctx.on_peer.set(current_pos.is_some());
-    }
-    if !ctx.on_peer.get() {
-        return event;
-    }
-    if let (PHASE_ENDED, Some(pos)) = (phase, current_pos) {
-        log::info!("Mission Control swipe on the peer: sending Win+Tab");
-        for e in win_tab() {
-            let _ = ctx.event_tx.blocking_send((pos, e));
+    let field = |f| unsafe { CGEventGetIntegerValueField(event, f) };
+    let on_peer = if event_type == DOCK_CONTROL && field(FIELD_HID_TYPE) == HID_DOCK_SWIPE {
+        let phase = field(FIELD_PHASE);
+        if phase == PHASE_BEGAN {
+            ctx.on_peer.set(current_pos.is_some());
+            log::debug!(
+                "dock swipe begins, cursor on the peer: {}",
+                ctx.on_peer.get()
+            );
         }
-    }
-    // the Mac must not open Mission Control
-    std::ptr::null_mut()
+        if let (PHASE_ENDED, true, Some(pos)) = (phase, ctx.on_peer.get(), current_pos) {
+            if field(FIELD_SWIPE_MOTION) == MOTION_VERTICAL {
+                log::info!("Mission Control swipe on the peer: sending Win+Tab");
+                for e in win_tab() {
+                    let _ = ctx.event_tx.blocking_send((pos, e));
+                }
+            }
+        }
+        ctx.on_peer.get()
+    } else {
+        current_pos.is_some()
+    };
+    // with the cursor on the peer, no trackpad gesture acts on the Mac
+    if on_peer { std::ptr::null_mut() } else { event }
 }
 
 /// the gesture tap, installed on the current thread's run loop
@@ -137,7 +150,7 @@ impl GestureTap {
                 SESSION_EVENT_TAP,
                 HEAD_INSERT_EVENT_TAP,
                 DEFAULT_TAP,
-                1 << DOCK_CONTROL,
+                (1 << GESTURE) | (1 << DOCK_CONTROL),
                 callback,
                 ctx as *mut c_void,
             )
